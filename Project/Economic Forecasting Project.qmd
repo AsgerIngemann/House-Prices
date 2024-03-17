@@ -1,0 +1,569 @@
+---
+title: "Forecasting the Growth rate in Residential housing across Danish Municapalities"
+author: "Asger Ingemann Rasmussen"
+format: pdf
+editor: visual
+---
+
+```{r, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(fable)
+library(tsibble)
+library(mapDK)
+library(plotDK)
+library(gridExtra)
+library(ggplot2)
+library(ggthemes)
+library(hrbrthemes)
+library(seasonal)
+library(tibble)
+library(feasts)
+library()
+
+
+```
+
+```{r, include=FALSE}
+### FULL DATA LOAD
+
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Economic Forecasting/Project")
+
+CPI <- read_excel("Data/Consumer price index (2015 = 100) Monthly National, General.xlsx", skip = 2) |> 
+  rename(Index = "Consumer price index",
+         Date = ...1) |> 
+  filter(Index != is.na(Index)) |> 
+  mutate(Date = seq(as.Date("1980-01-01"), as.Date("2024-01-01"), by = "1 month")) |> 
+  mutate(Date = yearquarter(Date)) |> 
+  group_by(Date) |> 
+  summarise(Index = mean(Index)) |> 
+  as_tsibble(key = "Index", index = "Date") |> 
+  mutate(Index = round(Index, 2),
+         Year = as.integer(substr(Date, start = 1, stop = 4)))
+
+Ejendomspriser <- read_excel("Data/Ejendomspriser - Quarter 1992 - 2023 - Kommuner .xlsx", skip = 2) |> 
+  select(-...1, -...2) |> 
+  rename(Kommune = ...3) |> 
+  mutate(across(-Kommune, as.numeric)) |> 
+  pivot_longer(cols = "1992K1":"2023K3",
+               names_to = "Date",
+               values_to = "House_Price") |> 
+  filter(!Kommune %in% c("Bornholm","Ærø","Læsø","Fanø","Samsø")) |> 
+  mutate(Date = str_replace(Date, "K", "Q")) |> 
+  mutate(Date = yearquarter(Date)) |> 
+  group_by(Kommune) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  left_join(CPI, by = "Date") |> 
+  filter(Index != is.na(Index)) |> 
+  mutate(House_Price_CPI = (House_Price / Index)*100,
+         House_Price_CPI = round(House_Price_CPI,2),
+         log_House_Price_CPI = log(House_Price_CPI)) |> 
+  as_tibble() |> 
+  group_by(Kommune) |> 
+  mutate(Growth_rate = as.numeric((House_Price_CPI - lag(House_Price_CPI)) / lag(House_Price_CPI))) |> 
+  ungroup() |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Interest_rates <- read_excel("Data/Nationalbankens rente - Udlån - Monthly National.xlsx", 
+                                                               skip = 2) |> 
+              select(-...1) |> 
+              rename(Rate = Månedsultimo) |>
+              filter(Rate != is.na(Rate)) |> 
+              mutate(Date = seq(as.Date("1985-10-01"), as.Date("2024-02-01"), by = "1 month"),
+                     Date = yearquarter(Date)) |>
+              select(-...2) |> 
+              mutate(Rate = as.double(Rate)) |> 
+              filter(Rate != is.na(Rate)) |> 
+              group_by(Date) |> 
+              summarise(Rate = mean(Rate)) |> 
+              mutate(diff_Rate = Rate - lag(Rate)) |> 
+              as_tsibble(index = "Date")
+
+Disposable_Income <-  read_excel("Data/Disposable Income by region Yearly.xlsx", 
+                                 skip = 2) |> 
+  select(...3, ...4, "1 Disposable income (2+30-31-32-35)") |> 
+  rename(Year = ...4,
+         Disp_Income = '1 Disposable income (2+30-31-32-35)',
+         Kommune = ...3) |> 
+  fill(Kommune) |>
+  filter(Disp_Income != is.na(Disp_Income)) |>
+  mutate(Year = as.integer(Year)) |> 
+  as_tsibble(index = Year, key = "Kommune") |>
+  left_join(CPI |> 
+              as_tibble() |> 
+              select(Year, Index) |> 
+              group_by(Year) |> 
+              summarise(Index = mean(Index)), by = "Year") |> 
+  mutate(Disp_Income_CPI = (Disp_Income / Index)*100,
+         log_Disp_Income = log(Disp_Income),
+         diff_log_Disp_Income = log_Disp_Income - lag(log_Disp_Income))
+
+Consumer_Confidence <- read_excel("Data/Consumer Confidence - National Monthly.xlsx", 
+                                     skip = 2) |> 
+  rename(Consumer_Confidence = 'Consumer confidence indicator') |> 
+  mutate(Date = seq(as.Date("1974-10-01"), as.Date("2024-02-01"), by = "1 month"),
+         Date = yearquarter(Date)) |> 
+  select(-...1) |> 
+  group_by(Date) |> 
+  mutate(Consumer_Confidence = as.integer(Consumer_Confidence)) |> 
+  filter(Consumer_Confidence != is.na(Consumer_Confidence)) |> 
+  summarise(Consumer_Confidence = mean(Consumer_Confidence)) |> 
+  mutate(diff_Consumer_Confidence = Consumer_Confidence - lag(Consumer_Confidence)) |> 
+  as_tsibble(index = "Date")
+
+Area <- read_excel("Data/Area Region Yearly .xlsx", 
+                   skip = 2) |> 
+  rename(Kommune = ...1) |> 
+  filter(Kommune != is.na(Kommune)) |> 
+  mutate(across("2007":"2024", as.integer)) |> 
+  pivot_longer(cols = "2007":"2024",
+               names_to = "Year",
+               values_to = "Area") |> 
+  mutate(Year = as.integer(Year)) |> 
+  as_tsibble(key = "Kommune", index = "Year")
+
+CCI <- read_excel("Data/Construction cost index National Quarterly.xlsx", 
+                  skip = 2) |> 
+  select(-...1, -...2, -...3, -...4) |> 
+  filter(`2003Q1` != is.na(`2003Q1`)) |> 
+  pivot_longer(cols = "2003Q1":"2023Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(Date = yearquarter(Date),
+         diff_CCI = CCI - lag(CCI)) |>
+  as_tsibble(index = "Date")
+
+Employmet_Rate <- read_excel("Data/Employmet Rate National Quarterly.xls", 
+                                 skip = 10) |> 
+  rename(Date = observation_date,
+         Employment_Rate = LREM64TTDKQ156S) |> 
+  mutate(Date = yearquarter(Date),
+         diff_Employment_Rate = Employment_Rate - lag(Employment_Rate)) |> 
+  as_tsibble(index = Date)
+
+GDP <- read_excel("Data/GDP pr Capita Yearly National.xlsx", 
+                      skip = 2) |> 
+  select(-...1) |> 
+  rename(Year = ...2,
+         GDP = 'Pr. capita. Current prices, (1000 DKK.)') |> 
+  mutate(Year = as.integer(Year)) |> 
+  left_join(CPI |> 
+              as_tibble() |> 
+              select(Year, Index) |> 
+              group_by(Year) |> 
+              summarise(Index = mean(Index)), by = "Year") |> 
+  filter(Year != is.na(Year)) |> 
+  mutate(diff_GDP = GDP - lag(GDP)) |> 
+  as_tsibble(index = Year)
+
+Gross_Lending <- read_excel("Data/Mortgage Banks Gross Lending - Quarterly National.xlsx", 
+                            skip = 2) |> 
+  select(-...1,-...2) |> 
+  rename(Date = ...3,
+         Gross_Lending = "All loan types") |> 
+  mutate(Date = yearquarter(Date),
+         diff_Gross_Lending = Gross_Lending - lag(Gross_Lending)) |> 
+  as_tsibble(index = "Date")
+
+column_names <- as.character(1993:2023)
+Key_for_Regions <- read_excel("Data/Key for Regions.xlsx") |> 
+  rename(Kom.nr = NUTS_KODE,
+         Kommune = NUTS_TXT) |> 
+  select(Kom.nr, Kommune) |> 
+  distinct(Kom.nr, .keep_all = TRUE)
+
+
+Grundskyld <- read_excel("Data/Grundskylds_Promille Regional Yearly.xlsx") |> 
+  slice(-c(1, 2,101:113)) |> 
+  mutate(across(all_of(column_names), as.double)) |> 
+  pivot_longer(cols = column_names,
+               names_to = "Year",
+               values_to = "Grundskyld") |> 
+  select(-'2024') |> 
+  left_join(Key_for_Regions, by = c("Kom.nr" = "Kom.nr")) |> 
+  select(-...1) |> 
+  mutate(Year = as.integer(Year),
+         Kommune = case_when(Kom.nr == 715 ~ "Aarhus",
+                             Kom.nr != 715 ~ Kommune)) |> 
+  as_tsibble(key = "Kommune", index = Year)
+
+
+Household <- read_excel("Data/Households per region Annualy.xlsx", 
+                             skip = 2) |> 
+  rename(Year = ...1) |> 
+  mutate(Year = as.integer(Year)) |> 
+  pivot_longer("Copenhagen":"Aalborg",
+               names_to = "Kommune",
+               values_to = "Households") |> 
+  group_by(Kommune) |> 
+  mutate(log_Households = log(Households),
+         diff_log_Households = log_Households - lag(log_Households,1)) |> 
+  as_tsibble(key = "Kommune", index = "Year")
+
+Houses_sold_raw_1 <- read_excel("Data/House Market by area - 2004-2007 Regional monthly.xlsx", 
+                                skip = 2)
+
+Houses_sold_raw_2 <- read_excel("Data/House Market by area - 2008-2024 Regional monthly.xlsx", 
+                                skip = 2)
+
+Houses_for_sale <- Houses_sold_raw_1 |> 
+  select(-...1,-...2) |> 
+  rename(Kommune = ...3) |> 
+  pivot_longer(cols = "2004M01":"2007M12",
+               names_to = "Date",
+               values_to = "Houses_for_sale") |> 
+  bind_rows(Houses_sold_raw_2 |> 
+              select(-...1,-...2) |> 
+              rename(Kommune = ...3) |> 
+              pivot_longer(cols = "2008M01":"2024M02",
+                           names_to = "Date",
+                           values_to = "Houses_for_sale")) |> 
+  mutate(Date = yearquarter(Date)) |> 
+  group_by(Kommune, Date) |> 
+  summarise(Houses_for_sale = mean(Houses_for_sale)) |> 
+  mutate(diff_Houses_for_sale = Houses_for_sale - lag(Houses_for_sale)) |> 
+  as_tsibble(key = "Kommune", index = Date)
+
+Invandring_raw <- read_excel("Data/Invandring Regional Quarter.xlsx", 
+                             skip = 2)
+Indvandring <- Invandring_raw |> 
+  filter(Copenhagen != is.na(Copenhagen)) |> 
+  mutate(Date = seq(as.Date("2007-04-01"), as.Date("2023-12-01"), by = "1 quarter"),
+         Date = yearquarter(Date)) |> 
+  pivot_longer("Copenhagen":"Aalborg",
+               names_to = "Kommune",
+               values_to = "Immigration") |> 
+  select(-...1) |> 
+  group_by(Kommune) |> 
+  mutate(diff_Immigration = Immigration - lag(Immigration)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Permits_raw <- read_excel("Data/Residential Construction Regional Quarterly.xlsx", 
+                          skip = 2)
+
+Permits <- Permits_raw |> 
+  select(-...1,-...2) |> 
+  rename(Kommune = ...3) |> 
+  filter(Kommune != is.na(Kommune)) |> 
+  pivot_longer(cols = "2006Q1":"2023Q4",
+               names_to = "Date",
+               values_to = "Permits") |> 
+  mutate(Date = yearquarter(Date),
+         diff_Permits = Permits - lag(Permits)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Population_raw <- read_excel("Data/Population By region quarterly.xlsx", 
+                             skip = 2)
+
+Population <- Population_raw |> 
+  select(-...1,-...2) |> 
+  rename(Kommune = ...3,
+         Date = ...4,
+         Population = Total) |> 
+  fill(Kommune) |> 
+  mutate(Date = yearquarter(Date),
+         diff_Population = Population - lag(Population)) |> 
+  as_tsibble(key = "Kommune", index = Date)
+
+Price_to_Income_Ratio_raw <- read_excel("Data/Price to Income Ratio - National Quarterly.xlsx", 
+                                        skip = 5)
+
+Price_to_Income_Ratio <- Price_to_Income_Ratio_raw |> 
+  select(...3) |> 
+  rename(PTIR = ...3) |> 
+  filter(PTIR != is.na(PTIR)) |> 
+  mutate(Date = seq(as.Date("1981-01-01"), as.Date("2023-09-01"), by = "1 quarter"),
+         Date = yearquarter(Date),
+         diff_PTIR = PTIR - lag(PTIR)) |> 
+  as_tsibble(index = Date)
+
+Price_to_Rent_ratio_raw <- read_excel("Data/Price to Rent ratio National Quarterly.xlsx", 
+                                      skip = 5)
+
+Price_to_Rent_ratio <- Price_to_Rent_ratio_raw |> 
+  select(-...2,-...4) |> 
+  rename(PTRR = ...3) |> 
+  filter(PTRR != is.na(PTRR)) |> 
+  mutate(Date = seq(as.Date("1970-01-01"), as.Date("2023-08-08"), by = "1 quarter")) |> 
+  select(PTRR, Date) |> 
+  mutate(Date = yearquarter(Date),
+         diff_PTRR = PTRR - lag(PTRR)) |> 
+  as_tsibble(index = Date)
+
+Rent_Prices_raw <- read_excel("Data/Rent Prices National Quarterly.xlsx", 
+                              skip = 5)
+
+Rent_Prices <- Rent_Prices_raw |> 
+  select(-...2,-...4) |> 
+  rename(Rent_Price = ...3) |> 
+  filter(Rent_Price != is.na(Rent_Price)) |> 
+  mutate(Date = seq(as.Date("1967-01-01"), as.Date("2024-01-01"), by = "1 quarter")) |> 
+  select(Rent_Price, Date) |> 
+  mutate(Date = yearquarter(Date),
+         diff_Rent_Price = Rent_Price - lag(Rent_Price)) |> 
+  as_tsibble(index = Date)
+
+Vacancy_raw <- read_excel("Data/Vacant dwellings Regional Yearly.xlsx", 
+                          skip = 2)
+
+Vacant_Houses <- Vacancy_raw |> 
+  select(-...1) |> 
+  rename(Kommune = ...2) |> 
+  filter(Kommune != is.na(Kommune)) |> 
+  pivot_longer(cols = "2010":"2023",
+               names_to = "Year",
+               values_to = "Vacant_Houses") |> 
+  mutate(Year = as.integer(Year),
+         diff_Vacant_Houses = Vacant_Houses - lag(Vacant_Houses)) |> 
+  as_tsibble(key = "Kommune", index = "Year")
+
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Key_for_Regions, by = "Kommune") |> 
+  mutate(Kom.nr = case_when(Kommune == "Århus" ~ 751,
+                            Kommune != "Århus" ~ Kom.nr)) |> 
+  left_join(Interest_rates, by = "Date") |> 
+  left_join(Disposable_Income, by = c("Kommune", "Year")) |> 
+  left_join(Consumer_Confidence, by ="Date") |> 
+  left_join(Area, by = c("Kommune", "Year")) |> 
+  left_join(CCI, by = "Date") |> 
+  left_join(Employmet_Rate, by = "Date") |> 
+  left_join(GDP, by = "Year") |> 
+  left_join(Gross_Lending, by = "Date") |>
+  left_join(Grundskyld, by = c("Kommune", "Year")) |> 
+  left_join(Household, by = c("Kommune", "Year")) |> 
+  left_join(Houses_for_sale, by = c("Kommune", "Date")) |>
+  left_join(Indvandring, by = c("Kommune", "Date")) |>
+  left_join(Permits, by = c("Kommune", "Date")) |>
+  left_join(Population, by = c("Kommune", "Date")) |>
+  left_join(Price_to_Income_Ratio, by = "Date") |>
+  left_join(Price_to_Rent_ratio, by = "Date") |>
+  left_join(Rent_Prices, by = "Date") |>
+  left_join(Vacant_Houses, by = c("Kommune", "Year")) |> 
+  select(-Index.y, -Index.x, -Kom.nr.y)
+```
+
+# Data
+
+This project deals with the question of forecasting the growth in residential house prices across municipalities.
+
+## House Prices
+
+House prices are collected from "Statiskbanken", prices are collected quarterly and spans from 1992 to 2023. The unit of measurement is *kr pr m2,* prices are calculated at the individual house level and then summarized at a municipality level, the published data is then the weighted average price for each municipality.
+
+The house prices have been adjusted for inflation, by taking the monthly consumer price index for housing published by Statistics Denmark.
+
+## Variables
+
+Motivation for the explanatory variables chosen comes from "Chapter 9 - Forecasting Real Estate Prices" These variables can be categorized into four categories.
+
+1.  Demand for real estate
+
+2.  Supply of real estate
+
+3.  Construction sector
+
+4.  Property Market
+
+A comprehensive list of all included variables can be found in the appendix along side their appropriate transformation.
+
+```{r echo=FALSE, warning=FALSE}
+#| label: average-growth rate
+#| fig-cap: "Average growth rate for real m2 prices in Denmark"
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  ggplot(aes(x = Date, y = Growth_rate)) +
+  geom_line() + # Overall growth rate
+  geom_line(data = Ejendomspriser |> 
+              filter(Kommune == c("København", "Kalundborg")),
+            aes(x = Date, y = Growth_rate, col = Kommune),
+            alpha = .4) + 
+  theme_minimal() + 
+  labs(
+    title = "",
+    x = "",
+    y = ""
+  ) +
+  theme(legend.position="top")
+
+```
+
+\
+
+A visual analysis of figure 1 indicates that since 1992 the average growth rate has been between 6% and minus 6% quarter to quarter.
+
+```{r echo=FALSE, warning=FALSE}
+#| label: average-growth rate decomposition
+#| fig-cap: "STL decomposition of the average growth rate for real m2 prices in Denmark"
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  model(stl = STL(Growth_rate)) |> 
+  components() |> 
+  autoplot() +
+  theme_minimal() +
+  labs(
+    title = "",
+    subtitle = "",
+    x = ""
+  )
+
+
+
+
+
+```
+
+Visual inspection implies a seasonality in real growth rates. Trend is constant over time, this implies the need of accounting for seasonality in our proposed models.
+
+```{r echo=FALSE, warning=FALSE}
+#| label: growth rate trend and season
+#| fig-cap: "Real growth rates seasonaly adjusted (red) and trend (black)"
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  model(stl = STL(Growth_rate)) |> 
+  components() |> 
+  ggplot(aes(x = Date)) +
+  geom_line(aes(y = season_adjust), col = "red") +
+  geom_line(aes(y = Growth_rate), alpha = .4) +
+  geom_line(aes(y = trend)) +
+  theme_minimal() +
+  labs(
+    y = "",
+    x = ""
+  )
+
+```
+
+```{r}
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  features(Growth_rate, unitroot_kpss)
+```
+
+From the augmented Dickey Fueller test, we can statistically reject the null hypothesis, and conclude that our Growth_rate are stationary.
+
+```{r}
+Ejendomspriser |> 
+  features(Growth_rate, unitroot_kpss)
+```
+
+The same results holds for each individual time series. Let us take a look at the autocorrelation, and partial autocorrelation of our series.
+
+```{r}
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  ACF(Growth_rate) |> 
+  autoplot()
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  PACF(Growth_rate) |> 
+  autoplot()
+  
+
+```
+
+From the our ACF plot we see a fast decrease from the first, lag to the fourth lag. This is not exactly as exponential as one might expect, ad we see that lag 14 and 18 are significant as well. The PACF is significant at the first lag and nearly not significant. With the idea of making a model as a simple as possible, an ARIMA(4,0,0) model seems relatively appropriate.
+
+```{r}
+```
+
+Let us do our first forecast, for this we will be making use of a extending window.
+
+```{r}
+
+
+W = 30
+i = 0
+j = 
+E = Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  nrow()
+fc <- matrix()
+
+for(i in 1:(E-W)) {
+
+fc[i] <- Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  model(ARMA = ARIMA(Growth_rate)) |> 
+  forecast(h = 1) |> 
+  as_tibble() |> 
+  select(.mean)
+
+}
+
+
+
+```
+
+```{r echo=FALSE, warning=FALSE}
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Date) |> 
+  summarise(Growth_rate = mean(Growth_rate)) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  as_tsibble(index = Date) |> 
+  ACF(Growth_rate, 12) |> 
+  ggplot(aes(x = lag, y = acf)) +
+  geom_point()
+
+```
+
+```{r}
+
+
+  
+```
+
+# Method
+
+A big decision about the quantity of models to choose, the data set contains 93 danish municipalities. Each of these municipalities is there own time series for which one can model and forecast, the question becomes if one should run a single model for all municipalities or model 93 specific models,
+
+# Forecast
+
+asdad
+
+# Conclusion
+
+asdasd
+
+```{r}
+#| echo: false
+2 * 2
+```
