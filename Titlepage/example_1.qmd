@@ -1,0 +1,25 @@
+---
+title: Economy project
+subtitle: with non-English diacritics in the author names. See documentation.
+author:
+  - name: Asger Rasmussen
+bibliography: references.bib
+format: 
+  html: default
+  titlepage-pdf: 
+    documentclass: scrbook
+    classoption: ["oneside", "open=any"]
+    number-sections: true
+    toc: true
+    lof: true
+    lot: true
+    titlepage: "bg-image"
+    titlepage-bg-image: "img/corner-bg.png"
+    titlepage-logo: "img/logo.png"
+    titlepage-header: "The Publisher"
+    titlepage-footer: |
+      NOAA Fisheries OpenSci\
+      Tools for Open Science\
+      [https://github.com/nmfs-opensci](https://github.com/nmfs-opensci)\
+    keep-tex: true
+---
