@@ -110,6 +110,59 @@ Permits_Region_2006_2024 = Permits_Region_2006_2024 |>
 Permits = Permits_Region_1993_2006 |> 
   bind_rows(Permits_Region_2006_2024)
 
+Immigration_Region_1980_2005 <- read_excel("Data/Immigration Region 1980 - 2005.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_1980_2005 = Immigration_Region_1980_2005 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "1980":"2005",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  group_by(Year, NUTS_KODE) |> 
+  summarise(Immigration = sum(Immigration, na.rm = TRUE)) |> 
+  mutate(Year = as.character(Year),
+         Year = as.integer(Year)) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration_Region_2006 <- read_excel("Data/Immigration Region 2006.xlsx", 
+                                      skip = 2)
+
+Immigration_Region_2006 = Immigration_Region_2006 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2,
+         Immigration = "2006") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
+         Year = as.integer(2006)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration_Region_2007_2023 <- read_excel("Data/Immigration Region 2007 - 2023.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_2007_2023 = Immigration_Region_2007_2023 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "2007":"2023",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
+         Year = as.integer(Year)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration = Immigration_Region_1980_2005 |> 
+  bind_rows(Immigration_Region_2006) |> 
+  bind_rows(Immigration_Region_2007_2023)
+
 Disposable_Income <-  read_excel("Data/Disposable Income by region Yearly.xlsx", 
                                  skip = 2) |> 
   select(...3, ...4, "1 Disposable income (2+30-31-32-35)") |> 
@@ -243,20 +296,6 @@ Houses_for_sale <- Houses_sold_raw_1 |>
   summarise(Houses_for_sale = mean(Houses_for_sale)) |> 
   mutate(diff_Houses_for_sale = Houses_for_sale - lag(Houses_for_sale)) |> 
   as_tsibble(key = "Kommune", index = Date)
-
-Invandring_raw <- read_excel("Data/Invandring Regional Quarter.xlsx", 
-                             skip = 2)
-Indvandring <- Invandring_raw |> 
-  filter(Copenhagen != is.na(Copenhagen)) |> 
-  mutate(Date = seq(as.Date("2007-04-01"), as.Date("2023-12-01"), by = "1 quarter"),
-         Date = yearquarter(Date)) |> 
-  pivot_longer("Copenhagen":"Aalborg",
-               names_to = "Kommune",
-               values_to = "Immigration") |> 
-  select(-...1) |> 
-  group_by(Kommune) |> 
-  mutate(diff_Immigration = Immigration - lag(Immigration)) |> 
-  as_tsibble(key = "Kommune", index = "Date")
 
 Population_raw <- read_excel("Data/Befolkning by Region 1993 - 2023.xlsx", 
                                              skip = 2)
@@ -495,7 +534,7 @@ Ejendomspriser <- Ejendomspriser |>
   left_join(Grundskyld, by = c("Kommune", "Year")) |> 
   left_join(Household, by = c("Kommune_2" = "Kommune", "Year")) |> 
   left_join(Houses_for_sale, by = c("Kommune_2" = "Kommune", "Date")) |>
-  left_join(Indvandring, by = c("Kommune_2" = "Kommune", "Date")) |>
+  left_join(Immigration, by = c("Year", "Kom.nr.x" = "NUTS_KODE")) |>
   left_join(Population, by = c("Kom.nr.x" = "Kom.nr", "Year")) |>
   left_join(Price_to_Income_Ratio, by = "Date") |>
   left_join(Vacant_Houses, by = c("Kommune", "Year")) |>

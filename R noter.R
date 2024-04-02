@@ -253,3 +253,56 @@ Permits_Region_2006_2024 = Permits_Region_2006_2024 |>
 
 Permits = Permits_Region_1993_2006 |> 
   bind_rows(Permits_Region_2006_2024)
+
+Immigration_Region_1980_2005 <- read_excel("Data/Immigration Region 1980 - 2005.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_1980_2005 = Immigration_Region_1980_2005 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "1980":"2005",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  group_by(Year, NUTS_KODE) |> 
+  summarise(Immigration = sum(Immigration, na.rm = TRUE)) |> 
+  mutate(Year = as.character(Year),
+         Year = as.integer(Year)) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration_Region_2006 <- read_excel("Data/Immigration Region 2006.xlsx", 
+                                      skip = 2)
+
+Immigration_Region_2006 = Immigration_Region_2006 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2,
+         Immigration = "2006") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
+         Year = as.integer(2006)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration_Region_2007_2023 <- read_excel("Data/Immigration Region 2007 - 2023.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_2007_2023 = Immigration_Region_2007_2023 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "2007":"2023",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
+         Year = as.integer(Year)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration = Immigration_Region_1980_2005 |> 
+  bind_rows(Immigration_Region_2006) |> 
+  bind_rows(Immigration_Region_2007_2023)
