@@ -12,14 +12,26 @@ availability_long <- availability_wide |>
   filter(Kommune == "København") |> 
   pivot_longer(cols = -c(Date, Kommune), names_to = "variable", values_to = "availability")
 
-availability_long |> 
-  filter(!grepl("^log|^diff", variable)) |> 
-  ggplot(aes(x = Date, y = variable, fill = availability)) +
-  geom_tile() +
+availability_long %>%
+  filter(!grepl("^log|^diff", variable)) %>%
+  ggplot(aes(x = Date, y = variable)) +
+  geom_tile(aes(fill = availability), width = .9, height = .9) +  # Use tile for background
+  geom_line(aes(group = variable, color = availability), size = 2) +  # Add lines
   scale_fill_manual(values = c("TRUE" = "blue", "FALSE" = "grey")) +
-  labs(title = "Data Availability Over Time by Municipality", x = "Date", y = "Variable", fill = "Available") +
+  scale_color_manual(values = c("TRUE" = "darkblue", "FALSE" = "darkgrey")) +  # Optional: Adjust line colors to match fill
+  labs(title = "Data Availability Over Time by Municipality",
+       x = "Date",
+       y = "Variable",
+       fill = "Available",
+       color = "Available") +  # Add color legend title if needed
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), strip.text.x = element_text(angle = 0))
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),
+        strip.text.x = element_text(angle = 0),
+        panel.spacing = unit(2, "lines"),
+        strip.background = element_blank(),
+        legend.position = "bottom",
+        panel.grid.major.x = element_blank(),  # Remove major vertical grid lines
+        panel.grid.minor.x = element_blank())  # Remove minor vertical grid lines
 
 
 Density_raw <- read_excel("Data/Befolknings Tæthed by Region 1993 - 2023.xlsx",
@@ -306,3 +318,74 @@ Immigration_Region_2007_2023 = Immigration_Region_2007_2023 |>
 Immigration = Immigration_Region_1980_2005 |> 
   bind_rows(Immigration_Region_2006) |> 
   bind_rows(Immigration_Region_2007_2023)
+
+Houses_for_sale_Region_2004_2020 <- read_excel("Data/Houses for sale Region 2004-2020.xlsx", 
+                                               skip = 2)
+Houses_for_sale_Region_2004_2020 = Houses_for_sale_Region_2004_2020 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2) |> 
+  pivot_longer(cols = "2004M01":"2020M12",
+               names_to = "Month",
+               values_to = "Houses_for_sale") |> 
+  group_by(Kommune) |> 
+  mutate(Date = seq(as.Date("2004-01-01"), as.Date("2020-12-01"), by = "1 month"),
+                Date = yearquarter(Date)) |> 
+  ungroup() |> 
+  select(Kommune, Houses_for_sale, Date) |> 
+  group_by(Kommune, Date) |> 
+  mutate(Houses_for_sale = sum(Houses_for_sale)) |> 
+  distinct(Kommune, Date, .keep_all = TRUE) |> 
+  ungroup() |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_for_sale_Region_2021_2024 <- read_excel("Data/Houses for sale Region 2021-2024.xlsx", 
+                                               skip = 2)
+
+Houses_for_sale_Region_2021_2024 = Houses_for_sale_Region_2021_2024 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2) |> 
+  pivot_longer(cols = "2021M01":"2024M02",
+               names_to = "Month",
+               values_to = "Houses_for_sale") |> 
+  group_by(Kommune) |> 
+  mutate(Date = seq(as.Date("2021-01-01"), as.Date("2024-02-01"), by = "1 month"),
+         Date = yearquarter(Date)) |> 
+  ungroup() |> 
+  select(Kommune, Houses_for_sale, Date) |> 
+  group_by(Kommune, Date) |> 
+  mutate(Houses_for_sale = sum(Houses_for_sale)) |> 
+  distinct(Kommune, Date, .keep_all = TRUE) |> 
+  ungroup() |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_for_sale = Houses_for_sale_Region_2004_2020 |> 
+  bind_rows(Houses_for_sale_Region_2021_2024)
+
+Construction_Cost_Index_1986_2015 <- read_excel("Data/Construction Cost Index 1986 - 2015.xlsx", 
+                                                skip = 2) 
+  
+Construction_Cost_Index_1986_2015 = Construction_Cost_Index_1986_2015 |> 
+  select(-...1,-...2,-...3) |> 
+  pivot_longer(cols = "1986Q4":"2015Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(CCI = CCI * (100 / 135.75),
+         Date = yearquarter(Date)) |> 
+  slice(1:65) |> 
+  as_tsibble(index = "Date")
+
+CCI <- read_excel("Data/Construction cost index National Quarterly.xlsx", 
+                  skip = 2) |> 
+  select(-...1, -...2, -...3, -...4) |> 
+  filter(`2003Q1` != is.na(`2003Q1`)) |> 
+  pivot_longer(cols = "2003Q1":"2023Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(Date = yearquarter(Date)) |>
+  as_tsibble(index = "Date")
+  
+Construction_Cost_Index = Construction_Cost_Index_1986_2015 |> 
+  bind_rows(CCI) |> 
+  mutate(diff_CCI = CCI - lag(CCI))
+
+
