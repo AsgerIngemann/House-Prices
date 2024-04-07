@@ -20,6 +20,7 @@ library(seasonal)
 library(tibble)
 library(feasts)
 library(doParallel)
+library(xgboost)
 ```
 
 ```{r, include=FALSE}
@@ -59,7 +60,7 @@ Ejendomspriser <- read_excel("Data/Ejendomspriser - Quarter 1992 - 2023 - Kommun
          log_House_Price_CPI = log(House_Price_CPI)) |> 
   as_tibble() |> 
   group_by(Kommune) |> 
-  mutate(Growth_rate = as.numeric((House_Price_CPI - lag(House_Price_CPI)) / lag(House_Price_CPI))) |> 
+  mutate(Growth_rate = log_House_Price_CPI - lag(log_House_Price_CPI)) |> 
   ungroup() |> 
   as_tsibble(key = "Kommune", index = "Date")
 
@@ -195,6 +196,19 @@ Consumer_Confidence <- read_excel("Data/Consumer Confidence - National Monthly.x
   mutate(diff_Consumer_Confidence = Consumer_Confidence - lag(Consumer_Confidence)) |> 
   as_tsibble(index = "Date")
 
+Construction_Cost_Index_1986_2015 <- read_excel("Data/Construction Cost Index 1986 - 2015.xlsx", 
+                                                skip = 2) 
+  
+Construction_Cost_Index_1986_2015 = Construction_Cost_Index_1986_2015 |> 
+  select(-...1,-...2,-...3) |> 
+  pivot_longer(cols = "1986Q4":"2015Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(CCI = CCI * (100 / 135.75),
+         Date = yearquarter(Date)) |> 
+  dplyr::slice(1:65) |> 
+  as_tsibble(index = "Date")
+
 CCI <- read_excel("Data/Construction cost index National Quarterly.xlsx", 
                   skip = 2) |> 
   select(-...1, -...2, -...3, -...4) |> 
@@ -202,9 +216,12 @@ CCI <- read_excel("Data/Construction cost index National Quarterly.xlsx",
   pivot_longer(cols = "2003Q1":"2023Q4",
                names_to = "Date",
                values_to = "CCI") |> 
-  mutate(Date = yearquarter(Date),
-         diff_CCI = CCI - lag(CCI)) |>
+  mutate(Date = yearquarter(Date)) |>
   as_tsibble(index = "Date")
+  
+Construction_Cost_Index = Construction_Cost_Index_1986_2015 |> 
+  bind_rows(CCI) |> 
+  mutate(diff_CCI = CCI - lag(CCI))
 
 Employmet_Rate <- read_excel("Data/Employmet Rate National Quarterly.xls", 
                                  skip = 10) |> 
@@ -236,7 +253,11 @@ Gross_Lending <- read_excel("Data/Mortgage Banks Gross Lending - Quarterly Natio
          Gross_Lending = "All loan types") |> 
   mutate(Date = yearquarter(Date),
          diff_Gross_Lending = Gross_Lending - lag(Gross_Lending)) |> 
-  as_tsibble(index = "Date")
+  as_tsibble(index = "Date") |> 
+  left_join(CPI, by = "Date") |>
+  filter(Index != is.na(Index)) |>
+  mutate(Real_Gross_Lending = (Gross_Lending / Index)) |>
+  select(-Year, -Index)
 
 column_names <- as.character(1993:2023)
 Key_for_Regions <- read_excel("Data/Key for Regions.xlsx") |> 
@@ -247,7 +268,7 @@ Key_for_Regions <- read_excel("Data/Key for Regions.xlsx") |>
 
 
 Grundskyld <- read_excel("Data/Grundskylds_Promille Regional Yearly.xlsx") |> 
-  slice(-c(1, 2,101:113)) |> 
+  dplyr::slice(-c(1, 2,101:113)) |> 
   mutate(across(all_of(column_names), as.double)) |> 
   pivot_longer(cols = column_names,
                names_to = "Year",
@@ -273,29 +294,47 @@ Household <- read_excel("Data/Households per region Annualy.xlsx",
          diff_log_Households = log_Households - lag(log_Households,1)) |> 
   as_tsibble(key = "Kommune", index = "Year")
 
-Houses_sold_raw_1 <- read_excel("Data/House Market by area - 2004-2007 Regional monthly.xlsx", 
-                                skip = 2)
-
-Houses_sold_raw_2 <- read_excel("Data/House Market by area - 2008-2024 Regional monthly.xlsx", 
-                                skip = 2)
-
-Houses_for_sale <- Houses_sold_raw_1 |> 
-  select(-...1,-...2) |> 
-  rename(Kommune = ...3) |> 
-  pivot_longer(cols = "2004M01":"2007M12",
-               names_to = "Date",
+Houses_for_sale_Region_2004_2020 <- read_excel("Data/Houses for sale Region 2004-2020.xlsx", 
+                                               skip = 2)
+Houses_for_sale_Region_2004_2020 = Houses_for_sale_Region_2004_2020 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2) |> 
+  pivot_longer(cols = "2004M01":"2020M12",
+               names_to = "Month",
                values_to = "Houses_for_sale") |> 
-  bind_rows(Houses_sold_raw_2 |> 
-              select(-...1,-...2) |> 
-              rename(Kommune = ...3) |> 
-              pivot_longer(cols = "2008M01":"2024M02",
-                           names_to = "Date",
-                           values_to = "Houses_for_sale")) |> 
-  mutate(Date = yearquarter(Date)) |> 
+  group_by(Kommune) |> 
+  mutate(Date = seq(as.Date("2004-01-01"), as.Date("2020-12-01"), by = "1 month"),
+                Date = yearquarter(Date)) |> 
+  ungroup() |> 
+  select(Kommune, Houses_for_sale, Date) |> 
   group_by(Kommune, Date) |> 
-  summarise(Houses_for_sale = mean(Houses_for_sale)) |> 
-  mutate(diff_Houses_for_sale = Houses_for_sale - lag(Houses_for_sale)) |> 
-  as_tsibble(key = "Kommune", index = Date)
+  mutate(Houses_for_sale = sum(Houses_for_sale)) |> 
+  distinct(Kommune, Date, .keep_all = TRUE) |> 
+  ungroup() |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_for_sale_Region_2021_2024 <- read_excel("Data/Houses for sale Region 2021-2024.xlsx", 
+                                               skip = 2)
+
+Houses_for_sale_Region_2021_2024 = Houses_for_sale_Region_2021_2024 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2) |> 
+  pivot_longer(cols = "2021M01":"2024M02",
+               names_to = "Month",
+               values_to = "Houses_for_sale") |> 
+  group_by(Kommune) |> 
+  mutate(Date = seq(as.Date("2021-01-01"), as.Date("2024-02-01"), by = "1 month"),
+         Date = yearquarter(Date)) |> 
+  ungroup() |> 
+  select(Kommune, Houses_for_sale, Date) |> 
+  group_by(Kommune, Date) |> 
+  mutate(Houses_for_sale = sum(Houses_for_sale)) |> 
+  distinct(Kommune, Date, .keep_all = TRUE) |> 
+  ungroup() |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_for_sale = Houses_for_sale_Region_2004_2020 |> 
+  bind_rows(Houses_for_sale_Region_2021_2024)
 
 Population_raw <- read_excel("Data/Befolkning by Region 1993 - 2023.xlsx", 
                                              skip = 2)
@@ -506,18 +545,22 @@ Realkreditudlån = Realkreditudlån_1 |>
   as_tsibble(index = "Date")
 
 Interest_rates = read_excel("Data/Udlåns rente Monthly.xlsx", 
-                                   skip = 2) |> 
-  select(-...1,-...2) |> 
+                                     skip = 2) |> 
+  select(-...1,-...2) |>
   rename(Rate = Månedsultimo) |>
-  filter(Rate != "..") |> 
+  filter(Rate != "..") |>
   mutate(Date = seq(as.Date("1992-4-01"), as.Date("2024-02-01"), by = "1 month"),
-         Date = yearquarter(Date)) |>
-  mutate(Rate = as.double(Rate)) |> 
-  filter(Rate != is.na(Rate)) |> 
-  group_by(Date) |> 
-  summarise(Rate = mean(Rate)) |> 
-  mutate(diff_Rate = Rate - lag(Rate)) |> 
-  as_tsibble(index = "Date")
+                  Date = yearquarter(Date)) |>
+  mutate(Rate = as.double(Rate)) |>
+  filter(Rate != is.na(Rate)) |>
+  group_by(Date) |>
+  summarise(Rate = mean(Rate)) |>
+  mutate(diff_Rate = Rate - lag(Rate)) |>
+  as_tsibble(index = "Date") |>
+  left_join(CPI, by = "Date") |>
+  filter(Index != is.na(Index)) |>
+  mutate(Real_Rate = (Rate / Index)) |>
+  select(-Year, -Index)
 
 
 Ejendomspriser <- Ejendomspriser |> 
@@ -527,17 +570,17 @@ Ejendomspriser <- Ejendomspriser |>
   left_join(Kommune_ID |> select(Kommune_2, Kom.nr), by = "Kom.nr") |> 
   left_join(Disposable_Income, by = c("Kommune_2" = "Kommune", "Year")) |> 
   left_join(Consumer_Confidence, by ="Date") |> 
-  left_join(CCI, by = "Date") |> 
+  left_join(Construction_Cost_Index, by = "Date") |> 
   left_join(Employmet_Rate, by = "Date") |> 
   left_join(GDP, by = "Year") |> 
   left_join(Gross_Lending, by = "Date") |>
   left_join(Grundskyld, by = c("Kommune", "Year")) |> 
   left_join(Household, by = c("Kommune_2" = "Kommune", "Year")) |> 
-  left_join(Houses_for_sale, by = c("Kommune_2" = "Kommune", "Date")) |>
+  left_join(Houses_for_sale, by = c("Kommune", "Date")) |>
   left_join(Immigration, by = c("Year", "Kom.nr.x" = "NUTS_KODE")) |>
   left_join(Population, by = c("Kom.nr.x" = "Kom.nr", "Year")) |>
   left_join(Price_to_Income_Ratio, by = "Date") |>
-  left_join(Vacant_Houses, by = c("Kommune", "Year")) |>
+  left_join(Vacant_Houses, by = c("Kommune_2" = "Kommune", "Year")) |>
   left_join(Price_to_Rent_ratio, by = "Date") |>
   left_join(Rent_Prices, by = "Date") |> 
   left_join(Anmeldte_voldsforbrydelser, by = c("Kom.nr.x" = "Kom.nr", "Year")) |> 
@@ -555,62 +598,188 @@ Ejendomspriser <- Ejendomspriser |>
 
 # Introduction
 
-The goal of this paper is to forecast real growth in house prices for municipalities in Denmark.
+The goal of this paper is to forecast real growth in house prices for municipalities in Denmark. Roughly 58% of adult population of Denmark are home owners during their lifetime, for most of these home owners their housing asset and mortgage makes up a dominant portion of their wealth and financial portfolio. Housing is primarily financed by mortgage banks, either through a fixed rate or adjustable rate loans.[^1] Specifically this study seeks to forecast growth in housing prices using a simple Autoregressive (AR) model benchmark alongside an Autoregressive distributed (ARDL) lag model using Economic variables motivated by historical evidence, against a modern machine learning approach using the framework of XGBoost, which has been one of the best performing machine learning methods for forecasting house prices. [^2]
 
-Outlined by National Bankens paper from 2021 *"Housing Market Robustness Should be Strengthened",* the Covid-19 pandemic lead to a rapid price increases for housing despite the economic downturn in the same period. The paper exemplifies the regional disparities, regions such as Copenhagen, Aarhus have seen more significant price increases as well as increased lending activity. This highlights heterogeneity across municipalities and the possibility of regional bubbles forming particular in more densely populated areas. In general these price increases outpaces the income level of the average dane, such development imposes several risks for the economy, 1) households taken on larger level of debt to sustain purchasing, 2) speculative behavior as inventors hope to capitalize on continuous growth, 3) A self-fulfilling prophecy where an expectation of future price increases leads to an increase of future prices.
+[^1]: https://academic.oup.com/jeea/article/19/1/403/5810063?guestAccessKey=8e7a8309-29cf-494d-988f-ef362c409418&login=false
 
-In the event that house prices does not grow or interest rates rises, the increased level of debt and speculative behavior might result in strong market correction leading to a decrease in house prices, making the general economy more susceptible to shocks.
+[^2]: https://www.mdpi.com/2813-2203/3/1/3
 
-This serves as motivation for the problem of forecasting house growth for the period of the next 5 to 10 years, in particular the house growth for individual municipalities.
+The primary motivation for this study is the National Bankens paper from 2021 *"Housing Market Robustness Should be Strengthened",* highlighting the importance of forecasting the growth in house prices. The paper highlights how the Covid-19 pandemic lead to rapid demand increases for housing, despite the general economic downturn resulting in large increases in property prices across Denmark. Specifically the urban regions such as Copenhagen and Aarhus experienced significant growth in both property prices, and lending activity. This highlights the regional disparities observed between urban and rural municipalities, in the case of property prices. In general these rapid price increases outpaces the growth rate of the income level for the average dane, raising concerns for the stability of the housing market, as households take on larger level of debt to finance their purchase of property alongside an increased speculative behavior by investors and individuals at the prospect of future growth in the property market. National Banken highlights these factors, as the driving force for the increased the possibility of a strong market correction in the property market.
 
-# Data
+This study does not seek to forecast the property market as a whole, but selectively the residential property market of single family homes. The property market is characterized by large heterogeneity, as properties are valued based on location and its physical properties which differs significantly both between regions and within regions. Because of the infrequent nature of property sales it is not feasible to obtain prices on individual properties, instead this study focuses on the aggregate $m^2$ prices on a municipality level. Denmark is made up of 98 different municipalities, over the last 12 years 68 municipalities have seen an increase in their population while 30 have seen a decrease, the general trend is that municipalities within the capital area has seen the largest growth in population while municipalities in Jutland and Fyn has experienced smaller or negative growth. A working paper by the National Bank in 2017 with the goal of understanding the regional model for the danish housing market, found that regional fundamentals are the dominant determined for real estate prices in the long run, where as the short term is mostly explained by the "ripple effect" where a increase in one region impacts prices in neighbouring regions, the goal of this paper is to forecast the long-term growth in house prices, cross regional impact is omitted, and will be focusing on the regional fundamentals as the primary source of predicting power for prices.
+
+Past literature has found compelling evidence that economic variables are associated with growth in house prices. Historic papers such as (Case, Shiller 1990)[^3] found that rent prices, construction cost, population and housing starts are significant for explaining excess returns in real estate. (Abraham, Hendershott 1996) and (DiPasquale, Wheaton1994) find similar findings. Historicaly models have been split into structural and non structural models, a quick overview of notable papers on the topic of forecasting house prices.
+
+[^3]: https://www.nber.org/system/files/working_papers/w3368/w3368.pdf
+
+1.  (Campbell, Davis, Gallin, Martin 2010) work within the framework of the dynamic Gordon growth treating real estate as a purely financial asset akin to the stock market. They make use of a bayesian VAR model to forecast the rent-price ratio and housing premium, finding substantial evidence for their respective predictability.
+
+2.  (Case, Shiller 1990) forecast real estate prices and excess returns, make use of a structural model looking at theoretical economic variables and their effect on prices, their simple model has laid much of the groundwork for future work.
+
+3.  (Rapach, Strauss 2009) expands on (Case, Shiller) structural model by forecasting across US states, making use of an ARDL framework alongside combination forecast. The ARDL model presented in this paper is build up on the model presented in this paper.
+
+# Data set
 
 ## House Prices
 
-House prices are collected from "Statiskbanken", prices are collected quarterly and spans from 1992 to 2023. The unit of measurement is *kr pr m2,* prices are calculated at the individual house level and then summarized at a municipality level, the published data is then the weighted average price for each municipality.
-
-The house prices have been adjusted for inflation, by taking the monthly consumer price index for housing published by Statistics Denmark.
+Regional house prices are obtained from "Finans Danmark", consist of quarterly observations for 1992Q1:2023Q4 prices are collected from the Real-ViewTM database, which purpose is to document market price from realized sales of properties on the open market by professional brokers. Prices are calculated as $m^2$ for the individual property, for the portal district and the municipality as a whole, using a summation of the individual properties $m^2$ price divided by the number of sales in that region. Prices are calculated four times a year to ensure the reliability and robustness of the reported data. The nomial $m^2$ prices are then converted into real terms, using the (CPI) deflator from Danmark statistik, with 2015 serving as the base year. The computed quarterly growth rates are calculated as the differences in the log levels of real housing prices for each region. The quarterly real housing price growth rates are plotted in Figure 1.
 
 ```{r echo=FALSE, warning=FALSE}
+
 #| label: average-growth rate
 #| fig-cap: "Average growth rate for real m2 prices in Denmark"
 
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
+Ejendomspriser %>%
+  as.tibble() %>%
+  group_by(Date) %>%
+  summarise(Growth_rate = mean(Growth_rate)) %>%
   ggplot(aes(x = Date, y = Growth_rate)) +
-  geom_line() + # Overall growth rate
-  geom_line(data = Ejendomspriser |> 
-              filter(Kommune == c("København", "Kalundborg")),
-            aes(x = Date, y = Growth_rate, col = Kommune),
-            alpha = .4) + 
-  theme_minimal() + 
+  geom_line(linetype = "dashed", alpha = 0.8, color = "black") + # Overall growth rate
+  geom_line(data = Ejendomspriser %>%
+              filter(Kommune %in% c("København", "Kalundborg")),
+            aes(x = Date, y = Growth_rate, col = Kommune)) +
+  scale_color_manual(values = c("København" = "#66C2A5", "Kalundborg" = "#FC8D62")) + # Specify colors
   labs(
-    title = "",
+    title = "Real Housing Price Growth Rate",
     x = "",
-    y = ""
+    y = "Growth Rate"
   ) +
-  theme(legend.position="top")
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
 ```
 
-Figure 1 depicts the average growth rate for two different municipalities and the aggregated average growth rate for the all municipalities, the figure suggest a similar trend across all municipalities this can be explained by similar macroeconomic trends in the economy.
+The blacked dashed line indicates the average real growth rates for house prices in all municipalities, this seems to indicate that housing price changes in locations are subject to similar market forces and economic conditions, while still maintaining heterogeneity between them.
 
 ## Variables
 
-Motivation for the explanatory variables chosen comes from "Chapter 9 - Forecasting Real Estate Prices" These variables can be categorized into four categories.
+For our structural forecast I consider 19 potential predictors of real housing price growth for each municipality, these predictors have been transformed by differentiating and/or deflating them by the (CPI) when deemed appropriate in an effort to make them stationary. The predictors are split up into national level economic variables or municipality level economic variables.
 
-1.  Demand for real estate
+Out of the nineteen potential predictors nine of them are **national level** economic variables:
 
-2.  Supply of real estate
+-   Real Interest rate (*Nationalbank offical lending rate by end of month, discounted by CPI and summarized quarterly, diff*)
 
-3.  Construction sector
+-   Consumer confidence (*Statisk Denmark monthly survey comprising the perceived economic situation, summarized quarterly, diff)*
 
-4.  Property Market
+-   Construction cost index *(Statisk Denmark construction cost index for residential buildings total, quarterly, diff)*
 
-A comprehensive list of all included variables can be found in the appendix along side their appropriate transformation.
+-   Employment rate *(FRED Employment rate aged 15-64 all persons for Denmark, yearly, diff)*
+
+-   GDP Pr. capita *(Statisk Denmark in 1000 DKK current prices, yearly, diff)*
+
+-   Real Gross Lending *(Nationalbank Gross lending by mortgage banks for all property types deflated by CPI in bn DKK, quarterly, diff)*
+
+-   Price to Income ratio *(OECD Analytical house prices indicators for Denmark, seasonal adjusted, quarterly, diff)*
+
+-   Price to Rent ratio *(OECD Analytical house prices indicators for Denmark, seasonal adjusted, quarterly, diff)*
+
+-   Rent price index *(OECD Analytical house prices indicators for Denmark, seasonal adjusted, quarterly, diff)*
+
+Real interest rate serves as an indication for cost of borrowing, as the long term and short term mortgage rents follow it closely, this has been deflated by CPI. Consumer confidence is an indication of the general economic perspective in the country, and include measures of intention of pruchasing or building a home. Including real gross lending they serve as way to predict the demand for housing. The construction cost index purpose is reflect the cost of housing construction in Denmark, used primarily by construction organizations and housing developers, alongside Price to Rent ratio they serve as an indication for the supply side of housing in Denmark. Employment rate and GDP Pr. Capita is general macro economic indicators for the danish economy.
+
+The remaining ten variables are **municipality level** economic variables:
+
+-   Disposable income *(Statisk Denmark disposable income for municipalities, log, yearly, diff)*
+
+-   Land tax *(Municipality keynumbers tax rate on land, yearly)*
+
+-   Income tax rate *(Municipality keynumbers income tax rate for municipality, yearly)*
+
+-   Immigration *(Municipality keynumbers number of immigrants log, yearly)*
+
+-   Population *(Municipality keynumbers population log, yearly, diff)*
+
+-   Reported violent crimes *(Municipality keynumbers population, yearly)*
+
+-   Reported burglaries *(Municipality keynumbers population, yearly)*
+
+-   Density *(Municipality keynumbers population, yearly)*
+
+-   Permits *(Denmark Statistik new housing permits, yearly)*
+
+-   Socioeconomic index *(Municipality keynumbers population log, yearly, diff)*
+
+Numerical disposable income which has been deflated the CPI to be Real Disposable income and population approximate demand for housing within municipalities. To account for supply of housing I make use of permits for new residential housing within region. Land tax, income tax rate, density, socioeconomic index and reported crimes accounts for the general economic structure within municipalities to account for the heterogeneity between them. Figure 2 shows data availability for all listed variables for a single municipality, two variables raise concerns namely socioeconomic index and employment rate.
+
+```{r echo=FALSE, warning=FALSE}
+
+#| label: Data-availability-over-time
+#| fig-cap: "Data availability over time by municipality"
+
+data_availability <- Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Kommune) |> 
+  select(-Kommune_2, -Kom.nr.x,
+         -Vacant_Houses, -Index, -House_Price_CPI, -Disp_Income_CPI,
+         -Andel_Ejerboliger, -Houses_for_sale) |> 
+  rename("Income tax" = Udskrivningsprocent,
+         "Mortgage lending" = Udlån,
+         "Day care services" = Udgift_til_dagtilbud,
+         "Socioeconomic index" = Socioøkonomiske_indeks,
+         "Rent price index" = Rent_Price,
+         "Interest rate" = Rate,
+         "Price to rent ratio" = PTRR,
+         "Price to income ratio" = PTIR,
+         "Real house price" = House_Price,
+         "Real growth rate" = Growth_rate,
+         "Gross mortgage lending" = Gross_Lending,
+         "GDP pr capita" = GDP,
+         "Employment rate" = Employment_Rate,
+         "Real disposable income" = Disp_Income,
+         "Consumer confidence" = Consumer_Confidence,
+         "Construction cost index" = CCI,
+         "Reported violentcrimes" = Anmeldte_voldsforbrydelser,
+         "Reported burglaries" = Anmeldte_indbrud) |> 
+  gather(key = "variable", value = "value", c(-Date, -Kommune))  |> 
+  group_by(Kommune, Date, variable) %>%
+  summarise(has_data = !any(is.na(value)))
+
+availability_wide <- data_availability %>%
+  pivot_wider(names_from = variable, values_from = has_data)
+
+availability_long <- availability_wide |> 
+  filter(Kommune == "København") |> 
+  pivot_longer(cols = -c(Date, Kommune), names_to = "variable", values_to = "availability")
+
+availability_long %>%
+  filter(!grepl("^log|^diff", variable)) %>%
+  ggplot(aes(x = Date, y = variable)) +
+  geom_tile(aes(fill = availability), width = .9, height = .9) +  # Use tile for background
+  geom_line(aes(group = variable, color = availability), size = 2) +  # Add lines
+  scale_fill_manual(values = c("TRUE" = "#FC8D62", "FALSE" = "grey")) +
+  scale_color_manual(values = c("TRUE" = "#FC8D62", "FALSE" = "darkgrey")) +  # Optional: Adjust line colors to match fill
+  labs(title = "Data availability over time by municipality",
+       x = "",
+       y = "",
+       fill = "Available",
+       color = "Available") +  # Add color legend title if needed
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),
+        strip.text.x = element_text(angle = 0),
+        strip.background = element_blank(),
+        legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+```
 
 # Method
+
+### Forecasting period
+
+The dataset on real growth in house prices spans from 1992Q1 to 2023Q4 amounting to 124 individual observations, a fairly modest number of observations which spans across three decades.
+
+Assessing the accuracy of our models require us to split our data into an initial training period for training our model, and a testing period to test the accuracy of our model on data is has not seen. For this purpose I will make use of a expanding window, because of the long run dynamics of prices on real estate and the modest number of observation present, this is favorable over a rolling window. A expanding window works by choosing an initial training period, for this paper "20" was chosen accounting for five years of data, after training the model on the initial period a one step ahead forecast is produced. Expanding the window by the next observation a new model is trained, and a new one step ahead forecast is produced, this patterns continuous until the last observation is reached, in our case this would be 2023Q4. This method is done for all produced models to assure the best model is chosen.
+
+### AR
+
+Auto regressive (AR) models are a simple framework using lags of the variable of interest to account for serial correlation within a timeseries. In this context they are mainly used as a benchmark to compare more complex models against. The general idea is that if added complexity does not increase forecasting accuracy sufficiently, a simpler and less complex model is preferred.
 
 A big decision about the quantity of models to choose, the data set contains 93 danish municipalities. Each of these municipalities is there own time series for which one can model and forecast, the question becomes if one should run a single model for all municipalities or model 93 specific models.
 
@@ -777,7 +946,7 @@ fc <- vector("list", length = E-W)
 
 for(i in 2:(E-W)) {
     fc[[i]] <- Ejendomspriser_tbl %>%
-        slice(1:(W+i-1)) %>%
+        dplyr::slice(1:(W+i-1)) %>%
         model(ARMA_400 = ARIMA(Growth_rate ~ pdq(4,0,0)),
               ARMA_100 = ARIMA(Growth_rate ~ pdq(1,0,0))) %>%
         forecast(h = 1) %>%
@@ -793,7 +962,7 @@ fc_combined |>
   summarise(Growth_rate = mean(Growth_rate)) |> 
   filter(Growth_rate != is.na(Growth_rate)) |> 
   as_tsibble(index = Date) |> 
-  slice((W+1):E) |> 
+  dplyr::slice((W+1):E) |> 
   select(Growth_rate)) |> 
   rename(Truth = Growth_rate...5,
          Forecast = .mean) |> 
@@ -835,7 +1004,7 @@ for(i in 1:(E-W)) {
   
   fc[[i]] <- Ejendomspriser |> 
   group_by(Kommune) |> 
-  slice(1:(29+i)) |> 
+  dplyr::slice(1:(29+i)) |> 
   ungroup() |> 
   filter(!is.na(Growth_rate)) |> 
   select(Kommune, Date, Growth_rate) |> 
@@ -881,7 +1050,7 @@ fc <- vector("list", length = E-W)
 fc <- foreach(i = 1:(E-W), .packages = c("dplyr", "tsibble", "fable", "fabletools")) %dopar% {
   Ejendomspriser %>% 
     group_by(Kommune) %>% 
-    slice(1:(29+i)) %>% 
+    dplyr::slice(1:(29+i)) %>% 
     ungroup() %>% 
     filter(!is.na(Growth_rate)) %>% 
     select(Kommune, Date, Growth_rate) %>% 
@@ -949,7 +1118,7 @@ fc_var <- vector("list", length = E-W)
 fc_var <- foreach(i = 1:(E-W), .packages = c("dplyr", "tsibble", "fable", "fabletools")) %dopar% {
   Ejendomspriser %>% 
     group_by(Kommune) %>% 
-    slice(1:(29+i)) %>% 
+    dplyr::slice(1:(29+i)) %>% 
     ungroup() %>% 
     filter(!is.na(Growth_rate)) %>% 
     as_tsibble(key = Kommune, index = Date) %>%
@@ -961,8 +1130,7 @@ fc_var <- foreach(i = 1:(E-W), .packages = c("dplyr", "tsibble", "fable", "fable
 
 ```
 
-```         
-```
+Let us do some XGBoost baby!
 
 # Conclusion
 

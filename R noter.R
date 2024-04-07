@@ -388,4 +388,176 @@ Construction_Cost_Index = Construction_Cost_Index_1986_2015 |>
   bind_rows(CCI) |> 
   mutate(diff_CCI = CCI - lag(CCI))
 
+### Simple XGBoost model
 
+data_train = Ejendomspriser |> 
+  filter(Date < yearquarter(	
+    "2010 Q4"))
+
+data_test = data_train = Ejendomspriser |> 
+  filter(Date > yearquarter(	
+    "2010 Q4"))
+
+library(dynamac) # for dynamic linear models (ARDL)
+library(forecast) # for forecasting
+library(dplyr) # for data manipulation
+
+# Assuming 'data' is your data.frame with all municipalities' time series data
+# 'Kommune' is the column indicating the municipality
+# The dependent variable and explanatory variables are also columns in this data.frame
+dependent_var <- "Growth_rate"
+explanatory_vars <- c("diff_Rate", "diff_log_Disp_Income")
+kommune_var <- "Kommune"
+
+# Unique list of municipalities
+municipalities <- unique(Ejendomspriser$Kommune)
+
+# Placeholder for all combined forecasts across municipalities
+all_municipalities_combined_forecasts <- list()
+municipality_data <- list()
+i = 1
+
+# Loop through each municipality
+
+for (municipality in municipalities) {
+  # Filter data for the current municipality and store it in the list
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  # Placeholder for combined forecasts for the current municipality
+  combined_forecasts <- list()
+  
+  # Expanding window parameters
+  start_window <- 20
+  end_window <- nrow(municipality_data[[i]])
+  forecast_horizon <- 1
+  
+  for (time in seq(start_window, end_window, by = 1)) {
+    window_data <- municipality_data[[i]][1:time, ] # Expanding window data for the municipality
+    
+    date <- municipality_data[[i]][1:time, ] |> select(Date) |> tail(1) + 1
+    
+    # Store individual forecasts from each model for this window
+    window_forecasts <- numeric(length(explanatory_vars))
+    j <- 1
+    
+    for (var in explanatory_vars) {
+      
+      # Define the ARDL model formula
+      model_formula <- reformulate(c(paste0((var))), response = dependent_var)
+      
+      lags_list <- setNames(list(1, 1), c("Growth_rate", var))
+      
+      # Run ARDL model for the municipality
+      model <- dynardl(model_formula, data = window_data, 
+                       lags = lags_list,
+                       ec = TRUE, simulate = FALSE)
+      
+      # Forecasting
+      forecast_result <- model$model$coefficients[[1]] + 
+        model$model$coefficients[[2]] * tail(model$model$model$l.1.Growth_rate, 1)[1] +
+        model$model$coefficients[[3]] * tail(model$model$model[,3],1)[1]
+      
+      # Storing the forecast from the current explanatory variable
+      window_forecasts[j] <- forecast_result
+      
+      j <- j + 1
+      
+    }
+    
+    # Combining the forecasts (e.g., taking the mean of individual forecasts)
+    combined_forecasts[[time]] <- data.frame(
+      Date = date,
+      CombinedForecast = mean(window_forecasts)
+    )
+  }
+  
+  # Store combined forecasts for the current municipality
+  all_municipalities_combined_forecasts[[municipality]] <- combined_forecasts
+  
+  # Increment the counter
+  i <- i + 1
+}
+
+# 'all_municipalities_combined_forecasts' now contains the combined forecasts for each municipality
+
+for (var in explanatory_vars) {
+  model_formula <- reformulate(c(paste0((var))), response = dependent_var)
+  print(model_formula)
+  model <- dynardl(formula = model_formula, data = window_data)
+  print(model$model)
+}
+
+
+Construction_Cost_Index_1986_2015 <- read_excel("Data/Construction Cost Index 1986 - 2015.xlsx", 
+                                                skip = 2) 
+
+Construction_Cost_Index_1986_2015 = Construction_Cost_Index_1986_2015 |> 
+  select(-...1,-...2,-...3) |> 
+  pivot_longer(cols = "1986Q4":"2015Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(CCI = CCI * (100 / 135.75),
+         Date = yearquarter(Date)) |> 
+  dplyr::slice(1:65) |> 
+  as_tsibble(index = "Date")
+
+
+         
+         
+Interest_rates = read_excel("Data/Udlåns rente Monthly.xlsx", 
+                                     skip = 2) |> 
+           select(-...1,-...2) |> 
+           rename(Rate = Månedsultimo) |>
+           filter(Rate != "..") |> 
+           mutate(Date = seq(as.Date("1992-4-01"), as.Date("2024-02-01"), by = "1 month"),
+                  Date = yearquarter(Date)) |>
+           mutate(Rate = as.double(Rate)) |> 
+           filter(Rate != is.na(Rate)) |> 
+           group_by(Date) |> 
+           summarise(Rate = mean(Rate)) |> 
+           mutate(diff_Rate = Rate - lag(Rate)) |> 
+           as_tsibble(index = "Date") |> 
+           left_join(CPI, by = "Date") |> 
+           filter(Index != is.na(Index)) |> 
+           mutate(Real_Rate = (Rate / Index))
+
+
+
+
+Gross_Lending <- read_excel("Data/Mortgage Banks Gross Lending - Quarterly National.xlsx", 
+                            skip = 2) |> 
+  select(-...1,-...2) |> 
+  rename(Date = ...3,
+         Gross_Lending = "All loan types") |> 
+  mutate(Date = yearquarter(Date),
+         diff_Gross_Lending = Gross_Lending - lag(Gross_Lending)) |> 
+  as_tsibble(index = "Date") |> 
+  left_join(CPI, by = "Date") |>
+  filter(Index != is.na(Index)) |>
+  mutate(Real_Gross_Lending = (Gross_Lending / Index)) |>
+  select(-Year, -Index)
+
+Disposable_Income <-  read_excel("Data/Disposable Income by region Yearly.xlsx", 
+                                 skip = 2) |> 
+  select(...3, ...4, "1 Disposable income (2+30-31-32-35)") |> 
+  rename(Year = ...4,
+         Disp_Income = '1 Disposable income (2+30-31-32-35)',
+         Kommune = ...3) |> 
+  fill(Kommune) |>
+  filter(Disp_Income != is.na(Disp_Income)) |>
+  mutate(Year = as.integer(Year)) |> 
+  as_tsibble(index = Year, key = "Kommune") |>
+  left_join(CPI |> 
+              as_tibble() |> 
+              select(Year, Index) |> 
+              group_by(Year) |> 
+              summarise(Index = mean(Index)), by = "Year") |> 
+  mutate(Disp_Income_CPI = (Disp_Income / Index)*100,
+         log_Disp_Income = log(Disp_Income),
+         diff_log_Disp_Income = log_Disp_Income - lag(log_Disp_Income))
+
+
+Ejendomspriser |> 
+  as.tibble() |> 
+  group_by(Kommune) |> 
+  select(-Kommune_2, -Kommune_ID, -Kom.nr.x, -Vacant_Houses, -Index, -House_Price_CPI, -Disp_Income_CPI)

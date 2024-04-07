@@ -1,0 +1,27 @@
+---
+title: "Introduction"
+format: pdf
+editor: visual
+---
+
+## Introduction
+
+The goal of this paper is to forecast real growth in house prices for municipalities in Denmark. Roughly 58% of adult population of Denmark are home owners during their lifetime, for most of these home owners their housing asset and mortgage makes up a dominant portion of their wealth and financial portfolio. Housing is primarily financed by mortgage banks, either through a fixed rate or adjustable rate loans.[^1] Specifically this study seeks to forecast growth in housing prices using a simple Autoregressive (AR) model benchmark alongside an Autoregressive distributed (ARDL) lag model using Economic variables motivated by historical evidence, against a modern machine learning approach using the framework of XGBoost, which has been one of the best performing machine learning methods for forecasting house prices. [^2]
+
+[^1]: https://academic.oup.com/jeea/article/19/1/403/5810063?guestAccessKey=8e7a8309-29cf-494d-988f-ef362c409418&login=false
+
+[^2]: https://www.mdpi.com/2813-2203/3/1/3
+
+The primary motivation for this study is the National Bankens paper from 2021 *"Housing Market Robustness Should be Strengthened",* highlighting the importance of forecasting the growth in house prices. The paper highlights how the Covid-19 pandemic lead to rapid demand increases for housing, despite the general economic downturn resulting in large increases in property prices across Denmark. Specifically the urban regions such as Copenhagen and Aarhus experienced significant growth in both property prices, and lending activity. This underlines the regional disparities observed between urban and rural municipalities, in the case of property prices. In general these rapid price increases outpaces the growth rate of the income level for the average dane, raising concerns for the stability of the housing market as a whole, as households take on larger level of debt to finance their purchase of property alongside an increased speculative behavior by investors and individuals at the prospect of future growth in the property market. National Banken highlights these factors, as the driving force for the increased the possibility of a strong market correction in the property market.
+
+This study does not seek to forecast the property market as a whole, but selectively the residential property market of single family homes. The property market is characterized by large heterogeneity, as properties are valued based on location and its physical properties which differs significantly both between regions and within regions. Because of the infrequent nature of property sales it is not feasible to obtain prices on individual properties, instead this study focuses on the aggregate $m^2$ prices on a municipality level. Denmark is made up of 98 different municipalities, over the last 12 years 68 municipalities have seen an increase in their population while 30 have seen a decrease, the general trend is that municipalities within the capital area has seen the largest growth in population while municipalities in Jutland and Fyn has experienced smaller or negative growth. A working paper by the National Bank in 2017 with the goal of understanding the regional model for the danish housing market, found that regional fundamentals are the dominant determined for real estate prices in the long run, where as the short term is mostly explained by the "ripple effect" where a increase in one region impacts prices in neighbouring regions, the goal of this paper is to forecast the long-term growth in house prices, by the predictive power of regional fundamentals omitting the cross regional impact.
+
+Past literature has found compelling evidence that economic variables are associated with growth in house prices. Historic papers such as (Case, Shiller 1990)[^3] found that rent prices, construction cost, population and housing starts are significant for explaining excess returns in real estate. (Abraham, Hendershott 1996) and (DiPasquale, Wheaton 1994) support these findings. Historically, models have predominantly been categorized into structural and non-structural frameworks. Here's a brief overview of notable papers concerning the forecasting of house prices.
+
+[^3]: https://www.nber.org/system/files/working_papers/w3368/w3368.pdf
+
+1.  (Campbell, Davis, Gallin, Martin 2010) work within the framework of the dynamic Gordon growth treating real estate as a purely financial asset akin to the stock market. They make use of a bayesian VAR model to forecast the rent-price ratio and housing premium, finding substantial evidence for their respective predictability.
+
+2.   (Case, Shiller 1990) forecast real estate prices and excess returns, make use of a structural model looking at theoretical economic variables and their effect on prices, their simple model has laid much of the groundwork for future work.
+
+3.  (Rapach, Strauss 2009) expands on (Case, Shiller) structural model by forecasting across US states, making use of an ARDL framework alongside combination forecast. The ARDL model presented in this paper is build up on the model presented in this paper.
