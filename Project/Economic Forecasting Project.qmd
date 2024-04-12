@@ -1,8 +1,24 @@
 ---
 title: "Forecasting the Growth rate in Residential housing across Danish Municapalities"
 author: "Asger Ingemann Rasmussen"
-format: pdf
-editor: visual
+bibliography: Bibliography.bib
+format: 
+  pdf: 
+    documentclass: report
+    classoption: [twocolumn, landscape]
+    geometry:
+      - top=30mm
+      - left=20mm
+      - right=20mm
+      - columnsep=15mm
+      - heightrounded
+    fontfamily: libertinus
+    colorlinks: true
+    cite-method: biblatex
+header-includes:
+  - \usepackage{floatrow}
+  - \floatsetup[figure]{capposition=top}
+fig_caption: yes
 ---
 
 ```{r, include=FALSE}
@@ -21,10 +37,23 @@ library(tibble)
 library(feasts)
 library(doParallel)
 library(xgboost)
+library(aTSA)
+library(gt)
+library(extrafont)
+library(ggpubr)
+library(showtext)
+library(ragg)
+library(extrafontdb)
+library(bootUR)
+library(dynamac)
+library(ARDL)
+
+
+options(warn=-1)
 ```
 
-```{r, include=FALSE}
-### FULL DATA LOAD
+```{r, include=FALSE, echo=FALSE, eval=FALSE}
+### FULL DATA LOAD QUARTERLY
 
 ### Mac #### setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Economic Forecasting/Project")
 setwd("C:/Users/asger/OneDrive - Aarhus universitet/Economic Forecasting/House-Prices")
@@ -137,7 +166,6 @@ Immigration_Region_2006 = Immigration_Region_2006 |>
   rename(Kommune = ...2,
          Immigration = "2006") |> 
   mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
-         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
          Year = as.integer(2006)) |> 
   left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
   select(Year, Immigration, NUTS_KODE) |> 
@@ -153,7 +181,6 @@ Immigration_Region_2007_2023 = Immigration_Region_2007_2023 |>
                names_to = "Year",
                values_to = "Immigration") |> 
   mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
-         Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
          Year = as.integer(Year)) |> 
   left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
   select(Year, Immigration, NUTS_KODE) |> 
@@ -268,18 +295,19 @@ Key_for_Regions <- read_excel("Data/Key for Regions.xlsx") |>
 
 
 Grundskyld <- read_excel("Data/Grundskylds_Promille Regional Yearly.xlsx") |> 
-  dplyr::slice(-c(1, 2,101:113)) |> 
+  filter(Kom.nr != is.na(Kom.nr)) |> 
+  select(-...1, -'2024') |> 
   mutate(across(all_of(column_names), as.double)) |> 
-  pivot_longer(cols = column_names,
-               names_to = "Year",
+  pivot_longer(cols = "1993":"2023",
+               names_to = "Date",
                values_to = "Grundskyld") |> 
-  select(-'2024') |> 
-  left_join(Key_for_Regions, by = c("Kom.nr" = "Kom.nr")) |> 
-  select(-...1) |> 
-  mutate(Year = as.integer(Year),
-         Kommune = case_when(Kom.nr == 715 ~ "Aarhus",
-                             Kom.nr != 715 ~ Kommune)) |> 
-  as_tsibble(key = "Kommune", index = Year)
+  left_join(Korrespondancetabel_Kommuner |> 
+              select(NUTS_KODE, NUTS_TXT) |> 
+              unique(), by = c("Kom.nr" = "NUTS_KODE")) |> 
+  select(-Kom.nr) |> 
+  rename(Kommune = NUTS_TXT) |> 
+  mutate(Date = as.integer(Date)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
 
 
 Household <- read_excel("Data/Households per region Annualy.xlsx", 
@@ -289,6 +317,7 @@ Household <- read_excel("Data/Households per region Annualy.xlsx",
   pivot_longer("Copenhagen":"Aalborg",
                names_to = "Kommune",
                values_to = "Households") |> 
+  mutate(Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune))
   group_by(Kommune) |> 
   mutate(log_Households = log(Households),
          diff_log_Households = log_Households - lag(log_Households,1)) |> 
@@ -596,55 +625,614 @@ Ejendomspriser <- Ejendomspriser |>
   select(-Index.y, -Index.x, -Kom.nr.y)
 ```
 
+```{r, include=FALSE}
+### FULL DATA LOAD YEARLY
+
+### Mac #### setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Economic Forecasting/Project")
+setwd("C:/Users/asger/OneDrive - Aarhus universitet/Economic Forecasting/House-Prices")
+
+CPI <- read_excel("Data/Consumer price index (2015 = 100) Monthly National, General.xlsx", skip = 2) |> 
+  rename(Index = "Consumer price index",
+         Date = ...1) |> 
+  filter(Index != is.na(Index)) |> 
+  mutate(Date = seq(as.Date("1980-01-01"), as.Date("2024-01-01"), by = "1 month")) |> 
+  mutate(Date = yearquarter(Date)) |> 
+  group_by(Date) |> 
+  summarise(Index = mean(Index)) |> 
+  mutate(Index = round(Index, 2),
+         Year = as.integer(substr(Date, start = 1, stop = 4))) |> 
+  select(Year, Index) |> 
+  group_by(Year) |> 
+  summarise(Index = mean(Index)) |> 
+  rename(CPI = Index,
+         Date = Year) |> 
+  as_tsibble(index = Date)
+
+Ejendomspriser <- read_excel("Data/Ejendomspriser - Quarter 1992 - 2023 - Kommuner .xlsx", skip = 2) |> 
+  select(-...1, -...2) |> 
+  rename(Kommune = ...3) |> 
+  mutate(across(-Kommune, as.numeric)) |> 
+  pivot_longer(cols = "1992K1":"2023K3",
+               names_to = "Date",
+               values_to = "House_Price") |> 
+  filter(!Kommune %in% c("Bornholm","Ærø","Læsø","Fanø","Samsø")) |> 
+  mutate(Date = str_replace(Date, "K", "Q")) |> 
+  mutate(Date = yearquarter(Date),
+         Date = year(Date)) |> 
+  group_by(Kommune, Date) |> 
+  summarise(House_Price = mean(House_Price)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  left_join(CPI, by = "Date") |> 
+  mutate(House_Price = round((House_Price / CPI) * 100,2),
+         Growth_rate = (exp(log(House_Price) - lag(log(House_Price))) - 1)*100)
+
+Korrespondancetabel_Kommuner <- read_excel("Data/Korrespondancetabel Kommuner.xlsx")
+
+Korrespondancetabel_Kommuner <- Korrespondancetabel_Kommuner |> 
+  mutate(NUTS_TXT = if_else(NUTS_TXT == "Lyngby-Tårbæk", "Lyngby-Taarbæk", NUTS_TXT),
+         NUTS_TXT = if_else(NUTS_TXT == "Aarhus", "Århus", NUTS_TXT))
+
+Permits_Region_1993_2006 <- read_excel("Data/Permits Region 1993-2006.xlsx", skip = 2)
+
+Permits_Region_1993_2006 = Permits_Region_1993_2006 |> 
+  select(-...1,-...2,-...3) |> 
+  rename(Kommune = ...4) |> 
+  pivot_longer(cols = "1981":"2006",
+               names_to = "Year",
+               values_to = "Permits") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "AMT_KOM_TXT")) |> 
+  filter(!is.na(NUTS_KODE)) |> 
+  select(Year, Permits, NUTS_KODE) |> 
+  mutate(Year = as.integer(Year)) |> 
+  group_by(Year, NUTS_KODE) |> 
+  mutate(Permits = sum(Permits)) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Permits_Region_2006_2024 <- read_excel("Data/Permits Region 2006-2024.xlsx", 
+                                       skip = 2) 
+
+Permits_Region_2006_2024 = Permits_Region_2006_2024 |> 
+  select(-...1,-...2,-...3) |> 
+  rename(Kommune = ...4) |> 
+  pivot_longer(cols = "2006Q1":"2023Q4",
+               names_to = "Year",
+               values_to = "Permits") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Permits, NUTS_KODE) |> 
+  mutate(Year = as.factor(substr(Year, 1,4)),
+         Permits = Permits) |> 
+  group_by(Year, NUTS_KODE) |> 
+  summarise(Permits = sum(Permits, na.rm = TRUE)) |> 
+  mutate(Year = as.character(Year),
+         Year = as.integer(Year)) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year") |> 
+  filter(Year != "2006")
+
+Permits = Permits_Region_1993_2006 |> 
+  bind_rows(Permits_Region_2006_2024) |> 
+  rename(Date = Year)
+
+Immigration_Region_1980_2005 <- read_excel("Data/Immigration Region 1980 - 2005.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_1980_2005 = Immigration_Region_1980_2005 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "1980":"2005",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Tårbæk", Kommune)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "AMT_KOM_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  group_by(Year, NUTS_KODE) |> 
+  summarise(Immigration = sum(Immigration, na.rm = TRUE)) |> 
+  mutate(Year = as.character(Year),
+         Year = as.integer(Year)) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year") |> 
+  filter(NUTS_KODE != is.na(NUTS_KODE))
+
+Immigration_Region_2006 <- read_excel("Data/Immigration Region 2006.xlsx", 
+                                      skip = 2)
+
+Immigration_Region_2006 = Immigration_Region_2006 |> 
+  select(-...1) |> 
+  rename(Kommune = ...2,
+         Immigration = "2006") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Year = as.integer(2006)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration_Region_2007_2023 <- read_excel("Data/Immigration Region 2007 - 2023.xlsx", 
+                                           skip = 2)
+
+Immigration_Region_2007_2023 = Immigration_Region_2007_2023 |> 
+  rename(Kommune = ...1) |> 
+  pivot_longer(cols = "2007":"2023",
+               names_to = "Year",
+               values_to = "Immigration") |> 
+  mutate(Kommune = if_else(Kommune == "Copenhagen", "København", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Year = as.integer(Year)) |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune" = "NUTS_TXT")) |> 
+  select(Year, Immigration, NUTS_KODE) |> 
+  distinct(Year, NUTS_KODE, .keep_all = TRUE) |> 
+  as_tsibble(key = "NUTS_KODE", index = "Year")
+
+Immigration = Immigration_Region_1980_2005 |> 
+  bind_rows(Immigration_Region_2006) |> 
+  bind_rows(Immigration_Region_2007_2023) |> 
+  rename(Date = Year)
+
+Disposable_Income <-  read_excel("Data/Disposable Income by region Yearly.xlsx", 
+                                 skip = 2) |> 
+  select(...3, ...4, "1 Disposable income (2+30-31-32-35)") |> 
+  rename(Date = ...4,
+         Disp_Income = '1 Disposable income (2+30-31-32-35)',
+         Kommune = ...3) |> 
+  fill(Kommune) |>
+  filter(Disp_Income != is.na(Disp_Income)) |>
+  mutate(Date = as.integer(Date)) |> 
+  as_tsibble(index = Date, key = "Kommune") |>
+  left_join(CPI, by = "Date") |> 
+  mutate(Disp_Income = (Disp_Income / CPI)*100,
+         log_Disp_Income = log(Disp_Income)) |> 
+  select(Kommune, Date, Disp_Income) |> 
+  mutate(Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Kommune = if_else(Kommune == "Copenhagen", "København", Kommune))
+  
+
+Consumer_Confidence <- read_excel("Data/Consumer Confidence - National Monthly.xlsx", 
+                                  skip = 2) |> 
+  rename(Consumer_Confidence = 'Consumer confidence indicator') |> 
+  mutate(Date = seq(as.Date("1974-10-01"), as.Date("2024-02-01"), by = "1 month"),
+         Date = yearquarter(Date),
+         Date = year(Date))|> 
+  select(-...1) |> 
+  group_by(Date) |> 
+  mutate(Consumer_Confidence = as.integer(Consumer_Confidence)) |> 
+  filter(Consumer_Confidence != is.na(Consumer_Confidence)) |> 
+  summarise(Consumer_Confidence = mean(Consumer_Confidence)) |> 
+  as_tsibble(index = "Date")
+
+Construction_Cost_Index_1986_2015 <- read_excel("Data/Construction Cost Index 1986 - 2015.xlsx", 
+                                               skip = 2) |> 
+  select(-...1,-...2,-...3) |> 
+  pivot_longer(cols = "1986Q4":"2015Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(CCI = CCI * (100 / 135.75),
+         Date = yearquarter(Date),
+         Date = year(Date)) |> 
+  group_by(Date) |> 
+  filter(CCI != is.na(CCI)) |> 
+  summarise(CCI = mean(CCI)) |> 
+  as_tsibble(index = "Date")
+
+CCI <- read_excel("Data/Construction cost index National Quarterly.xlsx", 
+                  skip = 2) |> 
+  select(-...1, -...2, -...3, -...4) |> 
+  filter(`2003Q1` != is.na(`2003Q1`)) |> 
+  pivot_longer(cols = "2003Q1":"2023Q4",
+               names_to = "Date",
+               values_to = "CCI") |> 
+  mutate(Date = yearquarter(Date),
+         Date = year(Date)) |>
+  group_by(Date) |> 
+  summarise(CCI = mean(CCI)) |> 
+  filter(Date > year("2015-01-01")) |> 
+  as_tsibble(index = Date)
+
+Construction_Cost_Index = Construction_Cost_Index_1986_2015 |> 
+  bind_rows(CCI)
+
+Employmet_Rate <- read_excel("Data/Unemployment Rate Denmark 1979 - 2023.xlsx", 
+                                                  skip = 2) |> 
+  pivot_longer(cols = "1979":"2023",
+               names_to = "Date",
+               values_to = "Unemployment_rate") |> 
+  select(-...1,-...2) |> 
+  mutate(Date = as.integer(Date)) |> 
+  as_tsibble(index = Date)
+
+GDP <- read_excel("Data/GDP pr Capita Yearly National.xlsx", 
+           skip = 2) |> 
+  select(-...1) |> 
+  rename(Date = ...2,
+         GDP = 'Pr. capita. Current prices, (1000 DKK.)') |> 
+  mutate(Date = as.integer(Date)) |> 
+  filter(Date != is.na(Date)) |> 
+  as_tsibble(index = "Date")
+
+Gross_Lending <- read_excel("Data/Mortgage Banks Gross Lending - Quarterly National.xlsx", 
+                            skip = 2) |> 
+  select(-...1,-...2) |> 
+  rename(Date = ...3,
+         Gross_Lending = "All loan types") |> 
+  mutate(Date = yearquarter(Date),
+         Date = year(Date)) |> 
+  group_by(Date) |> 
+  summarise(Gross_Lending = sum(Gross_Lending)) |> 
+  left_join(CPI, by = "Date") |> 
+  mutate(Gross_Lending = (Gross_Lending / CPI)*100) |> 
+  select(-CPI) |> 
+  as_tsibble(index = "Date")
+
+Key_for_Regions <- read_excel("Data/Key for Regions.xlsx") |> 
+  rename(Kom.nr = NUTS_KODE,
+         Kommune = NUTS_TXT) |> 
+  select(Kom.nr, Kommune) |> 
+  distinct(Kom.nr, .keep_all = TRUE) |> 
+  mutate(Kommune = if_else(Kommune == "Lyngby-Taarbæk", "Lyngby-Tårbæk", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune))
+
+column_names <- as.character(1993:2023)
+
+Grundskyld <- read_excel("Data/Grundskylds_Promille Regional Yearly.xlsx") |> 
+  filter(Kom.nr != is.na(Kom.nr)) |> 
+  select(-...1, -'2024') |> 
+  mutate(across(all_of(column_names), as.double)) |> 
+  pivot_longer(cols = "1993":"2023",
+               names_to = "Date",
+               values_to = "Grundskyld") |> 
+  left_join(Korrespondancetabel_Kommuner |> 
+              select(NUTS_KODE, NUTS_TXT) |> 
+              unique(), by = c("Kom.nr" = "NUTS_KODE")) |> 
+  select(-Kom.nr) |> 
+  rename(Kommune = NUTS_TXT) |> 
+  mutate(Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+
+Household <- read_excel("Data/Households per region Annualy.xlsx", 
+                        skip = 2) |> 
+  rename(Date = ...1) |> 
+  mutate(Date = as.integer(Date)) |> 
+  pivot_longer("Copenhagen":"Aalborg",
+               names_to = "Kommune",
+               values_to = "Households") |> 
+  mutate(Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Kommune = if_else(Kommune == "Copenhagen", "København", Kommune)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_sold_1992_2002 <- read_excel("Data/Ejendomssalg 1992-2002.xlsx", 
+                                    skip = 2) |> 
+  rename(Kommune_OLD = ...4) |> 
+  select(-...1,-...2,-...3) |> 
+  pivot_longer(cols = "1992K1":"2002K4",
+               names_to = "Date",
+               values_to = "Houses_sold") |> 
+  mutate(Date = yearquarter(Date),
+         Date = year(Date)) |> 
+  group_by(Kommune_OLD, Date) |> 
+  summarise(Houses_sold = sum(Houses_sold)) |> 
+  ungroup() |> 
+  left_join(Korrespondancetabel_Kommuner, by = c("Kommune_OLD" = "AMT_KOM_TXT"), relationship = "many-to-many") |> 
+  filter(NUTS_KODE != is.na(NUTS_KODE)) |>
+  rename(Kommune = NUTS_TXT) |> 
+  select(Date, Houses_sold, Kommune) |> 
+  group_by(Date, Kommune) |> 
+  summarise(Houses_sold = sum(Houses_sold)) |> 
+  mutate(Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune),
+         Kommune = if_else(Kommune == "Aarhus", "Århus", Kommune),
+         Kommune = if_else(Kommune == "Copenhagen", "København", Kommune)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_sold_2003 <- data.frame(
+  Date = rep(2003, n_distinct(Houses_sold_1992_2002$Kommune)),
+  Houses_sold = NA,
+  Kommune = unique(Houses_sold_1992_2002$Kommune))|>
+  as_tsibble(key = "Kommune", index = "Date")
+
+Houses_sold_1992_2003 <- Houses_sold_1992_2002 |> 
+  bind_rows(Houses_sold_2003) |>
+  as.tibble() |> 
+  group_by(Kommune) |> 
+  mutate(Houses_sold = round(if_else(is.na(Houses_sold), mean(Houses_sold, na.rm = TRUE), Houses_sold),2)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+
+Houses_for_sale_Region_2004_2023 <- read_excel("Data/Ejendomssalg 2004-2023.xlsx", 
+                                     skip = 2) |> 
+  select(-...1,-...2) |> 
+  rename(Kommune = ...3) |> 
+  pivot_longer(cols = "2004K1":"2023K4",
+               names_to = "Date",
+               values_to = "Houses_sold") |> 
+  mutate(Date = yearquarter(Date),
+         Date = year(Date)) |> 
+  group_by(Kommune, Date) |> 
+  summarise(Houses_sold = sum(Houses_sold)) |> 
+  as_tibble(key = "Kommune", index = "Date")
+  
+  
+Houses_sold <- Houses_sold_1992_2003 |> 
+  bind_rows(Houses_for_sale_Region_2004_2023)
+
+Population_raw <- read_excel("Data/Befolkning by Region 1993 - 2023.xlsx", 
+                             skip = 2)
+
+Population <- Population_raw |> 
+  filter(Kom.nr != is.na(Kom.nr)) |> 
+  select(-...1) |> 
+  pivot_longer("1993":"2024",
+               names_to = "Date",
+               values_to = "Population") |> 
+  left_join(Korrespondancetabel_Kommuner |> 
+              select(NUTS_KODE, NUTS_TXT) |> 
+              unique(), by = c("Kom.nr" = "NUTS_KODE")) |> 
+  select(-Kom.nr) |> 
+  rename(Kommune = NUTS_TXT) |> 
+  mutate(Date = as.integer(Date)) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Density_raw <- read_excel("Data/Befolknings Tæthed by Region 1993 - 2023.xlsx",
+                          skip = 2)
+
+Density <- Density_raw |> 
+  select(-...1, -"2024") |> 
+  pivot_longer(, cols = "1993":"2023",
+               names_to = "Date",
+               values_to = "Density") |> 
+  filter(!is.na(Kom.nr)) |>
+  mutate(Kom.nr = as.double(Kom.nr),
+         Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  select(-Kommune) |>
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Andel_Ejerboliger_raw <- read_excel("Data/Andel Ejerboliger Region Yearly 1993-2024.xlsx", 
+                                    skip = 2)
+
+Andel_Ejerboliger <- Andel_Ejerboliger_raw |> 
+  mutate('2010' = as.double('2010')) |> 
+  select(-...1, -"2024", -"2022", -"2023") |> 
+  pivot_longer(, cols = "1993":"2021",
+               names_to = "Date",
+               values_to = "Andel_Ejerboliger") |> 
+  filter(!is.na(Kom.nr)) |>
+  mutate(Kom.nr = as.double(Kom.nr),
+         Date = as.integer(Date)) |> 
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Anmeldte_indbrud_raw <- read_excel("Data/Anmeldte indbryd Region Yearly 1993-2024.xlsx", 
+                                   skip = 2)
+
+Anmeldte_indbrud <- Anmeldte_indbrud_raw |> 
+  select(-...1, -"2024", -"2023") |> 
+  pivot_longer(, cols = "1993":"2022",
+               names_to = "Date",
+               values_to = "Anmeldte_indbrud") |> 
+  filter(!is.na(Kom.nr)) |>
+  mutate(Kom.nr = as.double(Kom.nr),
+         Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  mutate(Anmeldte_indbrud = if_else(is.na(Anmeldte_indbrud),
+                                                mean(Anmeldte_indbrud), Anmeldte_indbrud)) |> 
+  select(-Kommune) |>
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Anmeldte_voldsforbrydelser_raw <- read_excel("Data/Anmeldte voldsforbrydelser Region Yearly 1993-2024.xlsx", 
+                                             skip = 2)
+
+Anmeldte_voldsforbrydelser <- Anmeldte_voldsforbrydelser_raw |> 
+  mutate(across(matches('^(199[3-9]|20[0-1][0-9]|202[0-3])$'), as.double))|> 
+  select(-...1, -"2024", -"2023") |> 
+  pivot_longer(, cols = "1993":"2022",
+               names_to = "Date",
+               values_to = "Anmeldte_voldsforbrydelser") |> 
+  filter(!is.na(Kom.nr)) |>
+  mutate(Kom.nr = as.double(Kom.nr),
+         Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  group_by(Kom.nr, Date) |> 
+  mutate(Anmeldte_voldsforbrydelser = if_else(is.na(Anmeldte_voldsforbrydelser),
+                                              mean(Anmeldte_voldsforbrydelser), Anmeldte_voldsforbrydelser)) |> 
+  select(-Kommune) |> 
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Price_to_Income_Ratio_raw <- read_excel("Data/Price to Income Ratio - National Quarterly.xlsx", 
+                                        skip = 5)
+
+Price_to_Income_Ratio <- Price_to_Income_Ratio_raw |> 
+  select(...3) |> 
+  rename(PTIR = ...3) |> 
+  filter(PTIR != is.na(PTIR)) |> 
+  mutate(Date = seq(as.Date("1981-01-01"), as.Date("2023-09-01"), by = "1 quarter"),
+         Date = year(Date)) |> 
+  group_by(Date) |> 
+  summarise(PTIR = mean(PTIR)) |> 
+  as_tsibble(index = Date)
+
+Price_to_Rent_ratio_raw <- read_excel("Data/Price to Rent ratio National Quarterly.xlsx", 
+                                      skip = 5)
+
+Price_to_Rent_ratio <- Price_to_Rent_ratio_raw |> 
+  select(-...2,-...4) |> 
+  rename(PTRR = ...3) |> 
+  filter(PTRR != is.na(PTRR)) |> 
+  mutate(Date = seq(as.Date("1970-01-01"), as.Date("2023-08-08"), by = "1 quarter")) |> 
+  select(PTRR, Date) |> 
+  mutate(Date = year(Date)) |> 
+  group_by(Date) |> 
+  summarise(PTRR = mean(PTRR)) |> 
+  as_tsibble(index = Date)
+
+Rent_Prices_raw <- read_excel("Data/Rent Prices National Quarterly.xlsx", 
+                              skip = 5)
+
+Rent_Prices <- Rent_Prices_raw |> 
+  select(-...2,-...4) |> 
+  rename(Rent_Price = ...3) |> 
+  filter(Rent_Price != is.na(Rent_Price)) |> 
+  mutate(Date = seq(as.Date("1967-01-01"), as.Date("2024-01-01"), by = "1 quarter")) |> 
+  select(Rent_Price, Date) |> 
+  mutate(Date = year(Date)) |> 
+  group_by(Date) |> 
+  summarise(Rent_Price = mean(Rent_Price)) |> 
+  as_tsibble(index = Date)
+
+Kommune_ID <- read_excel("Data/Kommune-ID.xlsx") |> 
+  rename(Kommune = Kommune...1,
+         Kommune_2 = Kommune...3)
+
+Udskrivningsprocent_raw <- read_excel("Data/Udskrivningsprocent Region Yearly 1993-2024.xlsx", 
+                                      skip = 2)
+
+Udskrivningsprocent <- Udskrivningsprocent_raw |> 
+  select(-...1, -"2024") |> 
+  filter(!is.na(Kom.nr)) |> 
+  mutate(across(where(is.character), as.numeric)) |> 
+  pivot_longer(, cols = "1993":"2023",
+               names_to = "Date",
+               values_to = "Udskrivningsprocent") |> 
+  mutate(Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  select(-Kommune) |>
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Udgift_til_dagtilbud_raw <- read_excel("Data/Udgift til dagtilbud Region Yearly 1993-2024.xlsx", 
+                                       skip = 2)
+
+Udgift_til_dagtilbud <- Udgift_til_dagtilbud_raw |> 
+  select(-...1, -"2024") |> 
+  filter(!is.na(Kom.nr)) |> 
+  mutate(across(where(is.character), as.numeric)) |> 
+  pivot_longer(, cols = "1993":"2023",
+               names_to = "Date",
+               values_to = "Udgift_til_dagtilbud") |> 
+  mutate(Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |>
+  select(-Kommune) |>
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Socioøkonomiske_indeks_raw <- read_excel("Data/Socioøkonomiske indeks Region Yearly 1996-2024.xlsx",
+                                         skip = 2)
+
+Socioøkonomiske_indeks <- Socioøkonomiske_indeks_raw |> 
+  select(-...1, -"2024") |> 
+  filter(!is.na(Kom.nr)) |> 
+  mutate(across(where(is.character), as.numeric)) |> 
+  pivot_longer(, cols = "1993":"2023",
+               names_to = "Date",
+               values_to = "Socioøkonomiske_indeks") |> 
+  mutate(Date = as.integer(Date),
+         Kommune = if_else(Kommune == "Lyngby-Tårbæk", "Lyngby-Taarbæk", Kommune)) |> 
+  select(-Kommune) |>
+  as_tsibble(key = "Kom.nr", index = "Date")
+
+Interest_rates = read_excel("Data/Interest Rates Udlån.xlsx", 
+                                   skip = 2) |> 
+  select(-...1,-...2,-...3, -'1985', -'1986', -'1987', -'1988', -'1989', -'1990', -'1991') |> 
+  pivot_longer(cols = "1992":"2023",
+               names_to = "Date",
+               values_to = "Interest_Rate") |> 
+  mutate(Date = as.integer(Date)) |> 
+  filter(Interest_Rate != is.na(Interest_Rate)) |> 
+  as_tsibble(index = "Date")
+
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Korrespondancetabel_Kommuner |> 
+              select(NUTS_KODE, NUTS_TXT) |> 
+              rename(Kommune = NUTS_TXT,
+                     Kom.nr = NUTS_KODE) |> 
+              unique(), by = "Kommune") |> 
+  left_join(Disposable_Income, by = c("Kommune" = "Kommune", "Date"))|> 
+  left_join(Consumer_Confidence, by = "Date") |> 
+  left_join(Construction_Cost_Index, by = "Date") |> 
+  left_join(Employmet_Rate, by = "Date") |> 
+  left_join(GDP, by = "Date") |>
+  left_join(Gross_Lending, by = "Date") |>
+  left_join(Grundskyld, by = c("Kommune", "Date")) |> 
+  left_join(Household, by = c("Kommune", "Date")) |> 
+  left_join(Houses_sold, by = c("Kommune", "Date")) |> 
+  left_join(Immigration, by = c("Date", "Kom.nr" = "NUTS_KODE")) |>
+  left_join(Population, by = c("Kommune", "Date")) |> 
+  left_join(Price_to_Income_Ratio, by = "Date") |> 
+  left_join(Price_to_Rent_ratio, by = "Date") |> 
+  left_join(Rent_Prices, by = "Date") |> 
+  left_join(Anmeldte_voldsforbrydelser, by = c("Kom.nr", "Date")) |> 
+  left_join(Anmeldte_indbrud, by = c("Kom.nr", "Date")) |> 
+  left_join(Density, by = c("Kom.nr", "Date")) |> 
+  left_join(Udskrivningsprocent, by = c("Kom.nr", "Date")) |> 
+  left_join(Udgift_til_dagtilbud, by = c("Kom.nr", "Date")) |> 
+  left_join(Socioøkonomiske_indeks, by = c("Kom.nr", "Date")) |> 
+  left_join(Interest_rates, by = "Date") |> 
+  left_join(Permits, by = c("Date", "Kom.nr" = "NUTS_KODE")) |> 
+  ungroup()
+
+```
+
+
 # Introduction
 
-The goal of this paper is to forecast real growth in house prices for municipalities in Denmark. Roughly 58% of adult population of Denmark are home owners during their lifetime, for most of these home owners their housing asset and mortgage makes up a dominant portion of their wealth and financial portfolio. Housing is primarily financed by mortgage banks, either through a fixed rate or adjustable rate loans.[^1] Specifically this study seeks to forecast growth in housing prices using a simple Autoregressive (AR) model benchmark alongside an Autoregressive distributed (ARDL) lag model using Economic variables motivated by historical evidence, against a modern machine learning approach using the framework of XGBoost, which has been one of the best performing machine learning methods for forecasting house prices. [^2]
+### General intro
 
-[^1]: https://academic.oup.com/jeea/article/19/1/403/5810063?guestAccessKey=8e7a8309-29cf-494d-988f-ef362c409418&login=false
+Real estate has long been on average the asset that accounts for the largest percent of individual Danes net wealth, accounting for roughly 54% in 2021.[^1] Fueled by *"The Danish Mortgage Model"*, seen as one of most effective and secure models for financing residential properties in the world, amounting to approximately 402bn EUR, making it the largest mortgage bond market in Europe. Of the adult population 58% are home owners at one time in their life, understanding and predicting growth in the house market is not just important for the individual Dane, but the overall economy.
 
-[^2]: https://www.mdpi.com/2813-2203/3/1/3
+[^1]: Statistics Denmark -- StatBank.dk/bef1
 
-The primary motivation for this study is the National Bankens paper from 2021 *"Housing Market Robustness Should be Strengthened",* highlighting the importance of forecasting the growth in house prices. The paper highlights how the Covid-19 pandemic lead to rapid demand increases for housing, despite the general economic downturn resulting in large increases in property prices across Denmark. Specifically the urban regions such as Copenhagen and Aarhus experienced significant growth in both property prices, and lending activity. This highlights the regional disparities observed between urban and rural municipalities, in the case of property prices. In general these rapid price increases outpaces the growth rate of the income level for the average dane, raising concerns for the stability of the housing market, as households take on larger level of debt to finance their purchase of property alongside an increased speculative behavior by investors and individuals at the prospect of future growth in the property market. National Banken highlights these factors, as the driving force for the increased the possibility of a strong market correction in the property market.
+### Research question
 
-This study does not seek to forecast the property market as a whole, but selectively the residential property market of single family homes. The property market is characterized by large heterogeneity, as properties are valued based on location and its physical properties which differs significantly both between regions and within regions. Because of the infrequent nature of property sales it is not feasible to obtain prices on individual properties, instead this study focuses on the aggregate $m^2$ prices on a municipality level. Denmark is made up of 98 different municipalities, over the last 12 years 68 municipalities have seen an increase in their population while 30 have seen a decrease, the general trend is that municipalities within the capital area has seen the largest growth in population while municipalities in Jutland and Fyn has experienced smaller or negative growth. A working paper by the National Bank in 2017 with the goal of understanding the regional model for the danish housing market, found that regional fundamentals are the dominant determined for real estate prices in the long run, where as the short term is mostly explained by the "ripple effect" where a increase in one region impacts prices in neighbouring regions, the goal of this paper is to forecast the long-term growth in house prices, cross regional impact is omitted, and will be focusing on the regional fundamentals as the primary source of predicting power for prices.
+The goal of this paper is to forecast real growth in house prices for municipalities in Denmark. The primary motivation for this study is the National Bankens paper from 2021 *"Housing Market Robustness Should be Strengthened",* highlighting the importance of forecasting the growth in house prices. The paper highlights how the Covid-19 pandemic lead to rapid demand increases for housing, despite the general economic downturn resulting in large increases in property prices across Denmark. Specifically the urban regions such as Copenhagen and Aarhus experienced significant growth in both property prices, and lending activity. This highlights the regional disparities observed between urban and rural municipalities, in the case of property prices. In general these rapid price increases outpaces the growth rate of the income level for the individual Dane, raising concerns for the stability of the housing market, as households take on larger level of debt to finance their purchase of property alongside an increased speculative behavior by investors and individuals at the prospect of future growth in the property market. National Banken highlights these factors, as the driving force for the increased the possibility of a strong market correction in the property market.
 
-Past literature has found compelling evidence that economic variables are associated with growth in house prices. Historic papers such as (Case, Shiller 1990)[^3] found that rent prices, construction cost, population and housing starts are significant for explaining excess returns in real estate. (Abraham, Hendershott 1996) and (DiPasquale, Wheaton1994) find similar findings. Historicaly models have been split into structural and non structural models, a quick overview of notable papers on the topic of forecasting house prices.
+### How?
 
-[^3]: https://www.nber.org/system/files/working_papers/w3368/w3368.pdf
+Specifically this study seeks to forecast growth in housing prices using a simple Autoregressive (AR) model benchmark alongside an Autoregressive distributed (ARDL) lag model using Economic variables motivated by historical evidence, against a modern machine learning approach using the framework of XGBoost, which has been one of the best performing machine learning methods for forecasting house prices. @sharma2024
 
-1.  (Campbell, Davis, Gallin, Martin 2010) work within the framework of the dynamic Gordon growth treating real estate as a purely financial asset akin to the stock market. They make use of a bayesian VAR model to forecast the rent-price ratio and housing premium, finding substantial evidence for their respective predictability.
+This study does not seek to forecast the property market as a whole, but selectively the residential property market of single family homes. The property market is characterized by large heterogeneity, as properties are valued based on location and its physical properties which differs significantly both between regions and within regions. Because of the infrequent nature of property sales it is not feasible to obtain prices on individual properties, instead this study focuses on the aggregate $sqm$ prices on a municipality level. Denmark consits of 98 different municipalities, over the last 12 years 68 municipalities have seen an increase in their population while 30 have seen a decrease, the general trend is that municipalities within the capital area has seen the largest growth in population, while municipalities in Jutland and Fyn has experienced smaller or negative growth. A working paper by the National Bank in 2017 with the goal of understanding the regional model for the danish housing market, found that regional fundamentals are the dominant determinant for real estate prices in the long run, where as the short term is mostly explained by the "ripple effect" where a increase in one region impacts prices in neighboring regions, the goal of this paper is to forecast the long-term growth in house prices, therefor cross regional impact is omitted, and the focus will be on disparities in the regional fundamentals between municipalities.
 
-2.  (Case, Shiller 1990) forecast real estate prices and excess returns, make use of a structural model looking at theoretical economic variables and their effect on prices, their simple model has laid much of the groundwork for future work.
+### Data
 
-3.  (Rapach, Strauss 2009) expands on (Case, Shiller) structural model by forecasting across US states, making use of an ARDL framework alongside combination forecast. The ARDL model presented in this paper is build up on the model presented in this paper.
+The data is primarily sourced by statbanken.dk, managed by Statistics Denmark a government agency responsible for compiling official statics in Denmark. Other sources consist of Nationalbanken, Kommunale nøgletal, boligstatistiken. Data has been transformed into a singular dataset by the researcher containing 23 variables spanning from 1993 - 2024.
+
+### What other people did
+
+Past literature has found compelling evidence that economic variables are associated with growth in house prices. Historic papers such as (@CaseShiller1990) rent prices, construction cost, population and housing starts are significant for explaining excess returns in real estate. @abrahamhendorshott1996 and (@dipasqualewheaton) find similar findings. Historicaly models have been split into structural and non structural models, a quick overview of notable papers on the topic of forecasting house prices.
+
+1.  @dipasqualewheaton work within the framework of the dynamic Gordon growth treating real estate as a purely financial asset akin to the stock market. They make use of a bayesian VAR model to forecast the rent-price ratio and housing premium, finding substantial evidence for their respective predictability.
+
+2.  (@CaseShiller1990) forecast real estate prices and excess returns, make use of a structural model looking at theoretical economic variables and their effect on prices, their simple model has laid much of the groundwork for future work.
+
+3.  (@rapachstrauss2009) expands on (Case, Shiller) structural model by forecasting across US states, making use of an ARDL framework alongside combination forecast. The ARDL model presented in this paper is build up on the model presented in this paper.
 
 # Data set
 
 ## House Prices
 
-Regional house prices are obtained from "Finans Danmark", consist of quarterly observations for 1992Q1:2023Q4 prices are collected from the Real-ViewTM database, which purpose is to document market price from realized sales of properties on the open market by professional brokers. Prices are calculated as $m^2$ for the individual property, for the portal district and the municipality as a whole, using a summation of the individual properties $m^2$ price divided by the number of sales in that region. Prices are calculated four times a year to ensure the reliability and robustness of the reported data. The nomial $m^2$ prices are then converted into real terms, using the (CPI) deflator from Danmark statistik, with 2015 serving as the base year. The computed quarterly growth rates are calculated as the differences in the log levels of real housing prices for each region. The quarterly real housing price growth rates are plotted in Figure 1.
+Regional house prices are obtained from "Finans Danmark", consist of quarterly observations for 1992Q1:2023Q4 prices are collected from the Real-ViewTM database, which purpose is to document market price from realized sales of properties on the open market by professional brokers. Prices are calculated as $sqm$ for the individual property, for the portal district and the municipality as a whole, using a summation of the individual properties $sqm$ price divided by the number of sales in that region. Prices are calculated four times a year to ensure the reliability and robustness of the reported data. The nomial $sqm$ prices are then converted into real terms, using the (CPI) deflator from Danmark statistik, with 2015 serving as the base year. The computed quarterly growth rates are calculated as the differences in the log levels of real housing prices for each region. The quarterly real housing price growth rates are plotted in Figure 1.
 
 ```{r echo=FALSE, warning=FALSE}
 
 #| label: average-growth rate
 #| fig-cap: "Average growth rate for real m2 prices in Denmark"
 
-Ejendomspriser %>%
-  as.tibble() %>%
-  group_by(Date) %>%
-  summarise(Growth_rate = mean(Growth_rate)) %>%
+Ejendomspriser  |> 
+  as.tibble() |> 
+  group_by(Date)  |> 
+  summarise(Growth_rate = mean(Growth_rate))  |> 
   ggplot(aes(x = Date, y = Growth_rate)) +
   geom_line(linetype = "dashed", alpha = 0.8, color = "black") + # Overall growth rate
-  geom_line(data = Ejendomspriser %>%
+  geom_line(data = Ejendomspriser |> 
               filter(Kommune %in% c("København", "Kalundborg")),
             aes(x = Date, y = Growth_rate, col = Kommune)) +
   scale_color_manual(values = c("København" = "#66C2A5", "Kalundborg" = "#FC8D62")) + # Specify colors
   labs(
     title = "Real Housing Price Growth Rate",
     x = "",
-    y = "Growth Rate"
+    y = ""
   ) +
-  theme_minimal() +
   theme(
     legend.position = "top",
     legend.title = element_blank(),
@@ -661,6 +1249,67 @@ The blacked dashed line indicates the average real growth rates for house prices
 ## Variables
 
 For our structural forecast I consider 19 potential predictors of real housing price growth for each municipality, these predictors have been transformed by differentiating and/or deflating them by the (CPI) when deemed appropriate in an effort to make them stationary. The predictors are split up into national level economic variables or municipality level economic variables.
+
+```{r echo=FALSE, warning=FALSE, fig.width=8, fig.height=6, fig.cap="Data availability for municipalities"}
+
+#| label: Data-availability-over-time
+#| fig-cap: "Data availability over time by municipality"
+
+data_availability <- Ejendomspriser |> 
+  as.tibble() |> 
+  select(-Kom.nr) |> 
+  group_by(Kommune) |> 
+  rename("Income tax" = Udskrivningsprocent,
+         "Day care services" = Udgift_til_dagtilbud,
+         "Socioeconomic index" = Socioøkonomiske_indeks,
+         "Rent price index" = Rent_Price,
+         "Interest rate" = Interest_Rate,
+         "Price to rent ratio" = PTRR,
+         "Price to income ratio" = PTIR,
+         "House price" = House_Price,
+         "Growth rate" = Growth_rate,
+         "Gross mortgage lending" = Gross_Lending,
+         "GDP pr capita" = GDP,
+         "Unemployment rate" = Unemployment_rate,
+         "Disposable income" = Disp_Income,
+         "Consumer confidence" = Consumer_Confidence,
+         "Construction cost index" = CCI,
+         "Reported violentcrimes" = Anmeldte_voldsforbrydelser,
+         "Reported burglaries" = Anmeldte_indbrud) |> 
+  gather(key = "variable", value = "value", c(-Date, -Kommune))  |> 
+  group_by(Kommune, Date, variable) %>%
+  summarise(has_data = !any(is.na(value)), .groups = "drop")
+
+availability_wide <- data_availability |> 
+  pivot_wider(names_from = variable, values_from = has_data)
+
+availability_long <- availability_wide |> 
+  filter(Kommune == "København") |> 
+  pivot_longer(cols = -c(Date, Kommune), names_to = "variable", values_to = "availability")
+
+availability_long |> 
+  filter(variable != "Kom.nr") |> 
+  filter(!grepl("^log|^diff", variable)) %>%
+  ggplot(aes(x = Date, y = variable)) +
+  geom_tile(aes(fill = availability), width = .9, height = .9) +  # Use tile for background
+  geom_line(aes(group = variable, color = availability), size = 2) +  # Add lines
+  scale_fill_manual(values = c("TRUE" = "#EB6A4B", "FALSE" = "grey")) +
+  scale_color_manual(values = c("TRUE" = "#EB6A4B", "FALSE" = "darkgrey")) +  # Optional: Adjust line colors to match fill
+  labs(
+       x = "",
+       y = "",
+       fill = "Available",
+       color = "Available") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0),
+        strip.text.x = element_text(angle = 0),
+        strip.background = element_blank(),
+        legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text = element_text(color = "black"))
+  
+```
 
 Out of the nineteen potential predictors nine of them are **national level** economic variables:
 
@@ -708,435 +1357,973 @@ The remaining ten variables are **municipality level** economic variables:
 
 Numerical disposable income which has been deflated the CPI to be Real Disposable income and population approximate demand for housing within municipalities. To account for supply of housing I make use of permits for new residential housing within region. Land tax, income tax rate, density, socioeconomic index and reported crimes accounts for the general economic structure within municipalities to account for the heterogeneity between them. Figure 2 shows data availability for all listed variables for a single municipality, two variables raise concerns namely socioeconomic index and employment rate.
 
-```{r echo=FALSE, warning=FALSE}
-
-#| label: Data-availability-over-time
-#| fig-cap: "Data availability over time by municipality"
-
-data_availability <- Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Kommune) |> 
-  select(-Kommune_2, -Kom.nr.x,
-         -Vacant_Houses, -Index, -House_Price_CPI, -Disp_Income_CPI,
-         -Andel_Ejerboliger, -Houses_for_sale) |> 
-  rename("Income tax" = Udskrivningsprocent,
-         "Mortgage lending" = Udlån,
-         "Day care services" = Udgift_til_dagtilbud,
-         "Socioeconomic index" = Socioøkonomiske_indeks,
-         "Rent price index" = Rent_Price,
-         "Interest rate" = Rate,
-         "Price to rent ratio" = PTRR,
-         "Price to income ratio" = PTIR,
-         "Real house price" = House_Price,
-         "Real growth rate" = Growth_rate,
-         "Gross mortgage lending" = Gross_Lending,
-         "GDP pr capita" = GDP,
-         "Employment rate" = Employment_Rate,
-         "Real disposable income" = Disp_Income,
-         "Consumer confidence" = Consumer_Confidence,
-         "Construction cost index" = CCI,
-         "Reported violentcrimes" = Anmeldte_voldsforbrydelser,
-         "Reported burglaries" = Anmeldte_indbrud) |> 
-  gather(key = "variable", value = "value", c(-Date, -Kommune))  |> 
-  group_by(Kommune, Date, variable) %>%
-  summarise(has_data = !any(is.na(value)))
-
-availability_wide <- data_availability %>%
-  pivot_wider(names_from = variable, values_from = has_data)
-
-availability_long <- availability_wide |> 
-  filter(Kommune == "København") |> 
-  pivot_longer(cols = -c(Date, Kommune), names_to = "variable", values_to = "availability")
-
-availability_long %>%
-  filter(!grepl("^log|^diff", variable)) %>%
-  ggplot(aes(x = Date, y = variable)) +
-  geom_tile(aes(fill = availability), width = .9, height = .9) +  # Use tile for background
-  geom_line(aes(group = variable, color = availability), size = 2) +  # Add lines
-  scale_fill_manual(values = c("TRUE" = "#FC8D62", "FALSE" = "grey")) +
-  scale_color_manual(values = c("TRUE" = "#FC8D62", "FALSE" = "darkgrey")) +  # Optional: Adjust line colors to match fill
-  labs(title = "Data availability over time by municipality",
-       x = "",
-       y = "",
-       fill = "Available",
-       color = "Available") +  # Add color legend title if needed
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 0, hjust = 1),
-        strip.text.x = element_text(angle = 0),
-        strip.background = element_blank(),
-        legend.position = "bottom",
-        panel.grid.major.x = element_blank(),
-        panel.grid.minor.x = element_blank())
-```
 
 # Method
 
-### Forecasting period
+### Expanding window
 
 The dataset on real growth in house prices spans from 1992Q1 to 2023Q4 amounting to 124 individual observations, a fairly modest number of observations which spans across three decades.
 
-Assessing the accuracy of our models require us to split our data into an initial training period for training our model, and a testing period to test the accuracy of our model on data is has not seen. For this purpose I will make use of a expanding window, because of the long run dynamics of prices on real estate and the modest number of observation present, this is favorable over a rolling window. A expanding window works by choosing an initial training period, for this paper "20" was chosen accounting for five years of data, after training the model on the initial period a one step ahead forecast is produced. Expanding the window by the next observation a new model is trained, and a new one step ahead forecast is produced, this patterns continuous until the last observation is reached, in our case this would be 2023Q4. This method is done for all produced models to assure the best model is chosen.
+Assessing the accuracy of our models require us to split our data into an initial training period for training our model, and a testing period to test the accuracy of our model, on data is has not seen. For this purpose I will make use of a expanding window, because of the long run dynamics of prices on real estate and the modest number of observation present, this is favorable over a rolling window, as it allows for the full data to be used accounting for long term trends in the housing market. A expanding window works by choosing an initial training period, for this paper 20 was chosen accounting for five years of data, after training the model on the initial period a one step ahead forecast is produced. Expanding the window by the next observation a new model is trained, and a new one step ahead forecast is produced, this patterns continuous until the last observation is reached, in our case this would be 2023Q4. This method is done for all produced models to assure the best model is chosen.
 
-### AR
+### RMSE
 
-Auto regressive (AR) models are a simple framework using lags of the variable of interest to account for serial correlation within a timeseries. In this context they are mainly used as a benchmark to compare more complex models against. The general idea is that if added complexity does not increase forecasting accuracy sufficiently, a simpler and less complex model is preferred.
+Historically the RMSFE has been used to evaluate proposed model for forecasting house prices, this paper will use a more general metric namely RMSE. RMSE is well known and popular choice for its symmetrical weighting scheme and intrepretable results. The reported RMSE is the average RMSE for all individual municipalities, this might not guarantee that the best model for each municipality is found, but rather the model that on average is best at forecasting for all individual municipality.
 
-A big decision about the quantity of models to choose, the data set contains 93 danish municipalities. Each of these municipalities is there own time series for which one can model and forecast, the question becomes if one should run a single model for all municipalities or model 93 specific models.
+### ARIMA
 
-Because of the long cyclical behavior an extending window is used over a rolling window for forecasting. There is three general models the first is a simple baseline model used as a comparison for more complex models, for the baseline model an auto regressive model is chosen, the general idea is to see how well past growth in house prices are able to forecast future house prices. The second model is a theoretical model encompassing explanatory variables motivated by historical papers forecasting house prices for this model a VAR model is chosen. Lastly a model making use as a state of the art machine learning, here a model with and without explanatory variables to see the general performance here XGBoost will be used.
+ARIMA (AutoRegressive Integrated Moving Average) is a widely popular model for forecasting time series, gaining widespread adoption through the seminal work of Box and Jenkins. ARIMA models are made up of two components. $$
+y_t = \phi_1y_{t-1} + \ldots + \phi_py_{t-p} + \varepsilon_t + \theta_1\varepsilon_{t-1} + \ldots + \theta_q\varepsilon_{t-q}.
+$$
 
-```{r}
+The first, an AutoRegressive (AR) component $y_t = \phi_1y_{t-1} + \ldots + \phi_py_{t-p}$ , employs lagged iterations of the dependent variable, leveraging historical data to address and account for serial correlation in the stochastic process. The Moving Average (MA) component $y_t = \varepsilon_t + \theta_1\varepsilon_{t-1} + \ldots + \theta_q\varepsilon_{t-q}$, incorporates past error terms to predict the variable of interest. ARIMA models can be extended to include seasonal components such as trend and cyclical behavior.
 
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |>
-  autoplot() +
-  theme_minimal() +
-  labs(
-    y = "",
-    x = ""
-  )
+### ARDL
 
-```
+Autoregressive distributed lag model (ARDL), are a popular model choice in the framework of analyzing economic growth, such as Foreign direct investments @belloumi2014, immigration @morley2006 and Real housing price growth @rapach2009. Like ARIMA models it is encompasses two components, an Autoregressive component such as the one mentioned above in the ARIMA model, and a Distributed lag (DL) component. Traditionaly a distributed lag model takes the form.
 
-```         
-```
+$$y_t = \sum_{j=-\infty}^{\infty} \beta_j x_{t-j} + \varepsilon_t $$
 
-A visual analysis of figure 1 indicates that since 1992 the average growth rate has been between 6% and minus 6% quarter to quarter.
+Where $y_t$ is our *response* time series, and $x_t$ is our *input* time series, using lag values of our *input* time series we seek to analyze or predict our *response* time series. @peng This dynamic relationship between our variables, are often modeled using vector autoregreesive (VAR) and vector error-correction (VEC) models, which allows for contemporaneous feedback from a response variable to other variables. @kripfganz2023 ARDL is a single equation model and therefor has a uni directional relationship between the *response* and *input*, meaning that the *response* variable does not contemporaneously affect our *input* variables like in the VAR & VEC models.
 
-```{r echo=FALSE, warning=FALSE}
-#| label: average-growth rate decomposition
-#| fig-cap: "STL decomposition of the average growth rate for real m2 prices in Denmark"
+When modeling two distinct time series the concept of a spurious regression and co-integreation plays an important role, spurious regression refers to the phenomenon where two non stationary time series display a statistical significant relationship even when no theoretical or substantial relation exist in reality. @granger1986 This statistical significant relationship is due to the some common underlying trend, this can be circumvented by making our time series stationary with the notion of differentiating or testing for co-integreated relationships between our time series. A co-integrated relationship refers to the case where the statistical properties of a linear combination of non stationary time series is stationary @thecoin, in the ARDL framework co-integration is tested using a *"bounds test"* propsed by @pesaran2001.
 
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  model(stl = STL(Growth_rate)) |> 
-  components() |> 
-  autoplot() +
-  theme_minimal() +
-  labs(
-    title = "",
-    subtitle = "",
-    x = ""
-  )
+Following the example of David E. Rapach & Jack K. Strauss for forecasting Real growth in house prices, an individual ARDL model based on a single predictor is given as
 
-```
+$$
+y_{t+h}^h = \alpha + \sum_{j=0}^{q_1-1} \beta_j \Delta y_{t-j} + \sum_{j=0}^{q_2-1} \gamma_j x_{t-j} + \epsilon_{t+h}^h
+$$
 
-Visual inspection implies a seasonality in real growth rates. Trend is constant over time, this implies the need of accounting for seasonality in our proposed models.
+Where $y_{t+h}^h$ is the growth of real housing prices from time $t$ to $t + h$. $\Delta y_{t-j}$ for period $h$ and the included lags of the growth rate in real housing prices, denoted by $j$. $x_{t-j}$ is a given predictor out of our 21 available predictors with its lags denoted by $j$, $\alpha$ is our constant and $\epsilon_{t+h}^h$ is an error term. The amount of lags to be included are chosen by the Bayesian information criteria (BIC), with the minimum value of $q_1 = 0$ and $q_2 = 1$ to ensure that our potential predictor is included. For each municipality an ARDL model is run for each individual explanatory in a single time period in our expanding window, all of these ARDL models are then combined using a combination forecast, the resulting value is the foretasted value $y_{t+h}^h$ for that municipality in that time period.
 
-```{r echo=FALSE, warning=FALSE}
-#| label: growth rate trend and season
-#| fig-cap: "Real growth rates seasonaly adjusted (red) and trend (black)"
+#### Combination forecast
 
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  model(stl = STL(Growth_rate)) |> 
-  components() |> 
-  ggplot(aes(x = Date)) +
-  geom_line(aes(y = season_adjust), col = "red") +
-  geom_line(aes(y = Growth_rate), alpha = .4) +
-  geom_line(aes(y = trend)) +
-  theme_minimal() +
-  labs(
-    y = "",
-    x = ""
-  )
+The discount mean square forecast error (DMSFE), was the best performing forecast combination in the paper by David E. Rapach & Jack K. Strauss, and will therefor be implemented in this case. The weights are given by
 
-```
+$$
+w_{i,t} = m^{-1}_{i,t} \sum_{j=1}^{n} m^{-1}_{j,t} \quad (i=1,…,n)
+$$
 
-```{r}
+where
 
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  features(Growth_rate, unitroot_kpss)
-```
-
-From the augmented Dickey Fueller test, we can statistically reject the null hypothesis, and conclude that our Growth_rate are stationary.
-
-```{r}
-Ejendomspriser |> 
-  features(Growth_rate, unitroot_kpss)
-```
-
-The same results holds for each individual time series. Let us take a look at the autocorrelation, and partial autocorrelation of our series.
-
-```{r}
-
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  ACF(Growth_rate) |> 
-  autoplot()
-
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  PACF(Growth_rate) |> 
-  autoplot()
-  
-
-```
-
-From the our ACF plot we see a fast decrease from the first, lag to the fourth lag. This is not exactly as exponential as one might expect, ad we see that lag 14 and 18 are significant as well. The PACF is significant at the first lag and nearly not significant. With the idea of making a model as a simple as possible, an ARIMA(4,0,0) model seems relatively appropriate.
-
-```{r}
-
-Ejendomspriser |> 
-  filter(Kommune == "København") |> 
-  ACF(Growth_rate) |> 
-  autoplot()
-
-Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  PACF(Growth_rate) |> 
-  autoplot()
-```
+$$
+m_{i,t} = \sum_{s=-h}^{h-\theta} \theta^{-h-s} (y_{s+h} - \hat{y}_{i,s+h|s})^2
+$$
 
 # Forecast
 
-Let us do our first forecast, for this we will be making use of a extending window.
+### ARIMA
 
-```{r}
+To understand the choices of specification for the ARIMA model, I present results for a single municipality in the hopes of making it easier to follow. The first step as with most forecasts is to visualize our time series, for this we will be focusing on the municipality of Copenhagen. The goal of visualizing our time series, is to identify any clear trend or seasonality within the stochastic process.
 
+```{r Real-growth-rate-house-prices-copenhagen, echo=FALSE, warning=FALSE,fig.cap="Real growth rate in house prices for Copenhagen"}
 
-W = 30
-i = 0
-j = 
-E = Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  nrow()
-
-Ejendomspriser_tbl <- Ejendomspriser %>%
-    as_tibble() %>%
-    group_by(Date) %>%
-    summarise(Growth_rate = mean(Growth_rate, na.rm = TRUE)) %>%
-    filter(!is.na(Growth_rate)) %>%
-    as_tsibble(index = Date)
-
-fc <- vector("list", length = E-W)
-
-for(i in 2:(E-W)) {
-    fc[[i]] <- Ejendomspriser_tbl %>%
-        dplyr::slice(1:(W+i-1)) %>%
-        model(ARMA_400 = ARIMA(Growth_rate ~ pdq(4,0,0)),
-              ARMA_100 = ARIMA(Growth_rate ~ pdq(1,0,0))) %>%
-        forecast(h = 1) %>%
-        as_tibble()
-}
-
-fc_combined <- bind_rows(fc)
-
-fc_combined |> 
-  bind_cols(Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  dplyr::slice((W+1):E) |> 
-  select(Growth_rate)) |> 
-  rename(Truth = Growth_rate...5,
-         Forecast = .mean) |> 
-  select(.model, Forecast, Truth) |> 
-  yardstick::rmse(Truth, Forecast)
-
-```
-
-```{r echo=FALSE, warning=FALSE}
+#| label: Real growth rate in house prices for Copenhagen
 
 Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  ACF(Growth_rate, 12) |> 
-  ggplot(aes(x = lag, y = acf)) +
-  geom_point()
-
-```
-
-```{r}
-
-W = 30
-i = 0
-j = 
-E = Ejendomspriser |> 
-  as.tibble() |> 
-  group_by(Date) |> 
-  summarise(Growth_rate = mean(Growth_rate)) |> 
-  filter(Growth_rate != is.na(Growth_rate)) |> 
-  as_tsibble(index = Date) |> 
-  nrow()
-
-fc <- vector("list", length = E-W)
-
-for(i in 1:(E-W)) {
+  filter(Kommune == "København") |> 
+  autoplot(Growth_rate) +
+  geom_line(color = "#EB6A4B", size = 0.75) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  theme_pubclean() +
+  labs(
+    x = "",
+    y = ""
+  ) +
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=0.5))
   
-  fc[[i]] <- Ejendomspriser |> 
-  group_by(Kommune) |> 
-  dplyr::slice(1:(29+i)) |> 
-  ungroup() |> 
-  filter(!is.na(Growth_rate)) |> 
-  select(Kommune, Date, Growth_rate) |> 
-  as_tsibble(key = Kommune, index = Date) |>
-  model(ARIMA_400 = ARIMA(Growth_rate ~ pdq(3,0,0) + PDQ(0,0,0))) |> 
-  forecast(h = 1) |> 
-  as_tibble()
+  
+```
+
+Figure 3, represent the real growth rate in house prices for the municipality of Copenhagen, the stochastic process does not visually seem to exhibit any clear long term trend or seasonality. To confirm this initial conclusion a ADF test is run containing 8 lags corresponding to 2 years, all p-values are below the threshold of 0.05 indicating that our time series is stationary.
+
+```{r, echo=FALSE, include=FALSE}
+
+library(bootUR)
+
+kommune_var <- "Kommune"
+
+municipalities <- unique(Ejendomspriser$Kommune)
+p_value <- list()
+municipality_name <- list()
+i = 1
+
+for (municipality in municipalities) {
+  
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  adf <- boot_adf(municipality_data[[i]][,5], B = 1999, deterministics = "trend", detrend = "OLS",
+         do_parallel = TRUE, show_progress = TRUE, criterion = "BIC")
+  
+  p_value[i] <- adf$p.value < 0.05
+  municipality_name[i] <- municipality_data[[i]]$Kommune |> unique()
+  
+  i <- i + 1
   
 }
 
+Growth_rate_adf <- as.data.frame(cbind(municipality_name, p_value))
 
 ```
 
-RMSE for every single municipality using an extending window and the model ARIMA(3,0,0)
+After running the initial adf test, there are multiple municipalities which fails to reject the null hypothesis after visual inspectation of multiple of these municipalities it might be a stationary time series around a linear trend, I will therefor detrend the all my time series and then run another ADF test on each ADF test.
 
 ```{r}
 
-fc <- bind_rows(fc) |> 
-  arrange(Kommune, Date)
+trend <- Ejendomspriser |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  model(STL(Growth_rate ~ trend())) |>
+  components() |> 
+  select(Kommune, Date, trend) |> 
+  as_tsibble(key = "Kommune", index = "Date")
 
-fc <- left_join(fc, Ejendomspriser |> select(Kommune, Date, Growth_rate), by = c("Kommune", "Date")) |> select(Kommune, .model, Date, .mean, Growth_rate.y)
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(trend, by = c("Kommune", "Date")) |> 
+  mutate(de_trend_Growth_rate = Growth_rate - trend)
 
-fc |> 
-  select(Kommune,.mean, Growth_rate.y) |> 
-  group_by(Kommune) |> 
-  yardstick::rmse(Growth_rate.y, .mean)
+kommune_var <- "Kommune"
+
+municipalities <- unique(Ejendomspriser$Kommune)
+p_value <- list()
+municipality_name <- list()
+i = 1
+
+for (municipality in municipalities) {
+  
+  municipality_data[[i]] <- Ejendomspriser_1 |> filter(Kommune == municipality)
+  
+  adf <- boot_adf(municipality_data[[i]][,47], B = 1999, deterministics = "trend", detrend = "OLS",
+         do_parallel = TRUE, show_progress = TRUE, criterion = "BIC")
+  
+  p_value[i] <- adf$p.value < 0.05
+  municipality_name[i] <- municipality_data[[i]]$Kommune |> unique()
+  
+  i <- i + 1
+  
+}
+
+detrend_Growth_rate_adf <- as.data.frame(cbind(municipality_name, p_value))
 
 ```
 
-Let us try to compare two different models, both are ARMA models
+After detrending Growth rate by removing the linear trend, all time series rejects the null hypothesis at I conclude that Growth rate is a stationary around a linear trend.
 
 ```{r}
 
-registerDoParallel(cores = 6)
+Ejendomspriser |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  model(STL(Growth_rate ~ trend())) |>
+  components() |> 
+  filter(Kommune == "København") |> 
+  autoplot() +
+  theme_minimal()
+  
 
-W <- 30
-E <- Ejendomspriser %>% filter(Kommune == "Aabenraa") %>% nrow()
+```
 
-# Prepare a list to store the forecasts
-fc <- vector("list", length = E-W)
+It is not clear from the PACF and ACF which model should be chosen. For efficiency I will make use of Rob J. Hyndman fable package, containing the ARIMA function which searches through the model space to identify the best ARIMA model for each individual time series, the choice of model is based on the Information criteria BIC. The information criteria BIC was chosen over AIC and AICc as it has been showed to favor less complex models. This procedure is done over the expanding window detailed above in section "Method, Expanding Window".
 
-# Use foreach to iterate in parallel
-fc <- foreach(i = 1:(E-W), .packages = c("dplyr", "tsibble", "fable", "fabletools")) %dopar% {
-  Ejendomspriser %>% 
-    group_by(Kommune) %>% 
-    dplyr::slice(1:(29+i)) %>% 
-    ungroup() %>% 
-    filter(!is.na(Growth_rate)) %>% 
-    select(Kommune, Date, Growth_rate) %>% 
-    as_tsibble(key = Kommune, index = Date) %>%
-    model(ARIMA_400 = ARIMA(Growth_rate ~ pdq(3,0,0) + PDQ(0,0,0)),
-          ARIMA_100 = ARIMA(Growth_rate ~ pdq(1,0,0) + PDQ(0,0,0))) %>% 
-    forecast(h = 1) %>% 
-    as_tibble()
+```{r, eval=FALSE, echo=FALSE}
+
+#| label: Appendix 2 Running the initial expanding window for model specifications
+
+kommune_var <- "Kommune"
+
+# Unique list of municipalities
+municipalities <- unique(Ejendomspriser$Kommune)
+
+# Placeholder for all combined forecasts across municipalities
+model_list <- list()
+municipality_data <- list()
+i = 1
+
+model_spec_ARIMA <- foreach(municipality = municipalities,
+                            .combine = "c",
+                            .packages = c("fabletools", "fable")) %dopar% {
+  
+  # Filter data for the current municipality and store it in the list
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  ARIMA_model <- list()
+  
+  # Expanding window parameters
+  start_window <- 20
+  end_window <- nrow(municipality_data[[i]])
+  forecast_horizon <- 1
+  j = 1
+  
+  for (time in seq(start_window, end_window, by = 1)) {
+    
+    window_data <- municipality_data[[i]][1:time, ]
+    
+    date <- municipality_data[[i]][1:time, ] |> select(Date) |> tail(1) + 1
+    
+    ARIMA_models <- window_data |> 
+      model(arima = ARIMA(de_trend_Growth_rate,
+                          selection_metric = function(x) x[["bic"]],
+                          stepwise = FALSE,
+                          greedy = FALSE,
+                          approximation = NULL))
+    
+    ARIMA_model[j] <- toString(ARIMA_models[,2][[1]])
+    
+    j <- j + 1
+    
+  }
+  
+  return(ARIMA_model)
+  
 }
 
 ```
 
-```{r}
+This initial search produced 73 unique model specification across over 10000 model specification. Out of these 73 unique models, the 3 most common was chosen as candidates for the ARIMA model, the chosen models are.
 
-fc <- bind_rows(fc) |> 
-  arrange(Kommune, Date)
+ARIMA(0,0,1) w/ mean, ARIMA(0,0,1) and ARIMA(1,0,0). To choose between these three models, I will run an expanding window including all three models, and make one-step ahead forecast for all periods in the testing period, the model with the lowest RMSE will be chosen as our ARIMA model.
 
-fc <- left_join(fc, Ejendomspriser |> select(Kommune, Date, Growth_rate), by = c("Kommune", "Date")) |> select(Kommune, .model, Date, .mean, Growth_rate.y)
+```{r, eval=FALSE, echo=FALSE}
 
-fc |> 
-  select(Kommune,.model, .mean, Growth_rate.y) |> 
-  group_by(Kommune, .model) |> 
-  yardstick::rmse(Growth_rate.y, .mean)
+#| label: Appendix 3 The most common models from our model specifications
 
-fc |> 
-  select(Kommune,.model, .mean, Growth_rate.y) |> 
-  group_by(Kommune, .model) |> 
-  yardstick::rmse(Growth_rate.y, .mean) |> 
+model_data_raw <- data.frame(Model = model_spec_ARIMA |> unlist())
+
+model_data <- model_data_raw |> 
+  group_by(Model) |> 
+  summarise(Count = n()) |> 
   ungroup() |> 
-  select(.model, .estimate) |> 
-  mutate(.model = as.factor(.model)) |> 
-  group_by(.model) |> 
-  summarise(RMSE_mean = mean(.estimate))
+  arrange(desc(Count))
 
+model_data |> 
+  slice_head(n = 5) |> 
+  ggplot(aes(x = Model, y = Count)) +
+  geom_col()
 ```
 
-Interestingly it seems that the RMSE seems to be lower for the ARIMA_100 model. But now we have a way to run the model on all of my time series and then compare which performs the best! Let us try with a VAR model. Let us take a look at our explanatory variables, and see which one has data available.
+```{r, eval=FALSE, echo=FALSE}
 
-```{r}
+#| label: Best model based on RMSE for model specifications
 
-data_availability <- Ejendomspriser %>%
-  gather(key = "variable", value = "value", -date) %>%
-  group_by(date, variable) %>%
-  summarise(has_data = !any(is.na(value)))
+kommune_var <- "Kommune"
 
-# Pivot wider to see a more intuitive format with dates as rows and variables as columns
-availability_wide <- data_availability %>%
-  pivot_wider(names_from = variable, values_from = has_data)
+# Unique list of municipalities
+municipalities <- unique(Ejendomspriser$Kommune)
 
-# Print the dates and their corresponding data availability for each variable
-print(availability_wide)
-```
+# Placeholder for all combined forecasts across municipalities
+prediction_full <- tibble()
+municipality_data <- list()
+i = 1
 
-```{r}
-
-registerDoParallel(cores = 6)
-
-W <- 30
-E <- Ejendomspriser %>% filter(Kommune == "Aabenraa") %>% nrow()
-
-# Prepare a list to store the forecasts
-fc_var <- vector("list", length = E-W)
-
-# Use foreach to iterate in parallel
-fc_var <- foreach(i = 1:(E-W), .packages = c("dplyr", "tsibble", "fable", "fabletools")) %dopar% {
-  Ejendomspriser %>% 
-    group_by(Kommune) %>% 
-    dplyr::slice(1:(29+i)) %>% 
-    ungroup() %>% 
-    filter(!is.na(Growth_rate)) %>% 
-    as_tsibble(key = Kommune, index = Date) %>%
-    model(VAR = VAR(vars(Growth_rate, diff_Rate, diff_log_Disp_Income))) %>% 
-    forecast(h = 1) %>% 
-    as_tibble()
+ARIMA_results <- foreach(municipality = municipalities) %dopar% {
+  
+  # Filter data for the current municipality and store it in the list
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  prediction <- tibble()
+  
+  # Expanding window parameters
+  start_window <- 20
+  end_window <- nrow(municipality_data[[i]])
+  forecast_horizon <- 1
+  
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  for (time in seq(start_window, end_window, by = 1)) {
+    
+    window_data <- municipality_data[[i]][1:time, ]
+    
+    date <- municipality_data[[i]][1:time, ] |> select(Date) |> tail(1) + 1
+    
+    forecasts <- window_data |> 
+      model(ARIMA_000 = ARIMA(de_trend_Growth_rate ~ pdq(0,0,0) + PDQ(0,0,0)),
+            ARIMA_200 = ARIMA(de_trend_Growth_rate ~ 0 + pdq(2,0,0) + PDQ(0,0,0)),
+            ARIMA_001 = ARIMA(de_trend_Growth_rate ~ 0 + pdq(0,0,1) + PDQ(0,0,0)),
+            ARIMA_003 = ARIMA(de_trend_Growth_rate ~ 0 + pdq(0,0,3) + PDQ(0,0,0)),
+            ARIMA_201 = ARIMA(de_trend_Growth_rate ~ 0 + pdq(2,0,1) + PDQ(0,0,0))) |> 
+      fabletools::forecast(h = 1)
+    
+    prediction <- bind_rows(prediction, forecasts)
+    
+  }
+  
+  prediction_full <- bind_rows(prediction_full, prediction)
+  
 }
 
+```
+
+```{r, eval=FALSE, echo=FALSE}
+
+#| label: RMSE for the best models
+
+ARIMA_results <- ARIMA_results |> 
+  bind_rows()
+
+ARIMA_results |> 
+  left_join(Ejendomspriser |>
+              select(Kommune, Date, Growth_rate, trend), by = c("Kommune", "Date"),
+            relationship = 'many-to-many') |> 
+  rename(Truth = Growth_rate,
+         Prediction = .mean,
+         Model = .model) |> 
+  mutate(Prediction = Prediction + trend) |> 
+  select(Model, Date, Prediction, Truth) |> 
+  group_by(Model) |> 
+  yardstick::rmse(Truth, Prediction)
+  
+```
+
+Based on table 3, the model which achieves the lowest RMSE is an ARIMA(0,0,0) with mean, this leads me to conclude that the for comprising against ARDL this model will be chosen.
+
+```{r, eval=FALSE, include=FALSE}
+
+#| label: Plot over the forecasted values
+
+prediction_full |> 
+  filter(Kommune == "København") |>
+  left_join(Ejendomspriser |> 
+              select(Kommune, Date, Growth_rate), by = c("Kommune", "Date")) |> 
+  ggplot(aes(x = Date, y = .mean, color = .model)) +
+  geom_line() +
+  geom_line(aes(x = Date, y = Growth_rate.y),
+            color = "black",
+            alpha = 0.3) +
+  labs(
+    y = "",
+    x = "",
+    title = "Forecasted values for Copenhagen ARIMA"
+  )
 
 ```
 
-Let us do some XGBoost baby!
+### ARDL
+
+I start by backcasting and forecasting variables with missing values as presented in figure 2. ARIMA is chosen as the time series model for both tasks.
+
+```{r}
+
+Forecasted_Disp_Income <- Ejendomspriser |> 
+  model(ARIMA = ARIMA(Disp_Income)) |> 
+  fabletools::forecast(h = 1) |> 
+  as_tibble() |> 
+  select(Kommune, Date, .mean) |> 
+  mutate(Date = Date-1) |> 
+  rename(Disp_Income = .mean) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Forecasted_Disp_Income, by = c("Kommune", "Date")) |> 
+  mutate(Disp_Income.x = if_else(is.na(Disp_Income.x) & Date == 2023, Disp_Income.y, Disp_Income.x)) |> 
+  select(-Disp_Income.y) |> 
+  rename(Disp_Income = Disp_Income.x)
+
+Forecasted_Anmeldte_voldsforbrydelser <- Ejendomspriser |> 
+  model(ARIMA = ARIMA(Anmeldte_voldsforbrydelser)) |> 
+  fabletools::forecast(h = 1) |> 
+  as_tibble() |> 
+  select(Kommune, Date, .mean) |> 
+  mutate(Date = Date-1) |> 
+  rename(Anmeldte_voldsforbrydelser = .mean) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Forecasted_Anmeldte_voldsforbrydelser, by = c("Kommune", "Date")) |> 
+  mutate(Anmeldte_voldsforbrydelser.x = if_else(is.na(Anmeldte_voldsforbrydelser.x) & Date == 2023,
+                                                Anmeldte_voldsforbrydelser.y, Anmeldte_voldsforbrydelser.x)) |> 
+  select(-Anmeldte_voldsforbrydelser.y) |> 
+  rename(Anmeldte_voldsforbrydelser = Anmeldte_voldsforbrydelser.x)
+
+Forecasted_Anmeldte_indbrud <- Ejendomspriser |> 
+  model(ARIMA = ARIMA(Anmeldte_indbrud)) |> 
+  fabletools::forecast(h = 1) |> 
+  as_tibble() |> 
+  select(Kommune, Date, .mean) |> 
+  mutate(Date = Date-1) |> 
+  rename(Anmeldte_indbrud = .mean) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Forecasted_Anmeldte_indbrud, by = c("Kommune", "Date")) |> 
+  mutate(Anmeldte_indbrud.x = if_else(is.na(Anmeldte_indbrud.x) & Date == 2023,
+                                                Anmeldte_indbrud.y, Anmeldte_indbrud.x)) |> 
+  select(-Anmeldte_indbrud.y) |> 
+  rename(Anmeldte_indbrud = Anmeldte_indbrud.x)
+
+Socioøkonomisk <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Socioøkonomiske_indeks, Date, Kommune) |> 
+  filter(Socioøkonomiske_indeks != is.na(Socioøkonomiske_indeks)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Socioøkonomiske_indeks)) |>
+  fabletools::forecast(h = 4) |>
+  mutate(Date = rep(c("1992-01-01","1993-01-01","1994-01-01","1995-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Socioøkonomisk, by = c("Kommune", "Date")) |> 
+  mutate(Socioøkonomiske_indeks = if_else(is.na(Socioøkonomiske_indeks) & Date == 1992,
+                                                .mean, Socioøkonomiske_indeks),
+         Socioøkonomiske_indeks = if_else(is.na(Socioøkonomiske_indeks) & Date == 1993,
+                                                .mean, Socioøkonomiske_indeks),
+         Socioøkonomiske_indeks = if_else(is.na(Socioøkonomiske_indeks) & Date == 1994,
+                                                .mean, Socioøkonomiske_indeks),
+         Socioøkonomiske_indeks = if_else(is.na(Socioøkonomiske_indeks) & Date == 1995,
+                                                .mean, Socioøkonomiske_indeks)) |> 
+  select(-.mean)
+
+Indbrud <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Anmeldte_indbrud, Date, Kommune) |> 
+  filter(Anmeldte_indbrud != is.na(Anmeldte_indbrud)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Anmeldte_indbrud)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Indbrud, by = c("Kommune", "Date")) |> 
+  mutate(Anmeldte_indbrud = if_else(is.na(Anmeldte_indbrud) & Date == 1992,
+                                                .mean, Anmeldte_indbrud)) |> 
+  select(-.mean)
+
+
+Anmeldte_voldsforbrydelser <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Anmeldte_voldsforbrydelser, Date, Kommune) |> 
+  filter(Anmeldte_voldsforbrydelser != is.na(Anmeldte_voldsforbrydelser)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Anmeldte_voldsforbrydelser)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  mutate(Anmeldte_voldsforbrydelser = if_else(is.na(Anmeldte_voldsforbrydelser),
+                                              mean(Anmeldte_voldsforbrydelser, na.rm = TRUE),
+                                              Anmeldte_voldsforbrydelser))
+
+Population <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Population, Date, Kommune) |> 
+  filter(Population != is.na(Population)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Population)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Population, by = c("Kommune", "Date")) |> 
+  mutate(Population = if_else(is.na(Population) & Date == 1992,
+                                                .mean, Population)) |> 
+  select(-.mean)
+
+Udskrivningsprocent <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Udskrivningsprocent, Date, Kommune) |> 
+  filter(Udskrivningsprocent != is.na(Udskrivningsprocent)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Udskrivningsprocent)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Udskrivningsprocent, by = c("Kommune", "Date")) |> 
+  mutate(Udskrivningsprocent = if_else(is.na(Udskrivningsprocent) & Date == 1992,
+                                                .mean, Udskrivningsprocent)) |> 
+  select(-.mean)
+
+Grundskyld <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Grundskyld, Date, Kommune) |> 
+  filter(Grundskyld != is.na(Grundskyld)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Grundskyld)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Grundskyld, by = c("Kommune", "Date")) |> 
+  mutate(Grundskyld = if_else(is.na(Grundskyld) & Date == 1992,
+                                                .mean, Grundskyld)) |> 
+  select(-.mean)
+
+Density <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Density, Date, Kommune) |> 
+  filter(Density != is.na(Density)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Density)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Density, by = c("Kommune", "Date")) |> 
+  mutate(Density = if_else(is.na(Density) & Date == 1992,
+                                                .mean, Density)) |> 
+  select(-.mean)
+
+Udgift_til_dagtilbud <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Udgift_til_dagtilbud, Date, Kommune) |> 
+  filter(Udgift_til_dagtilbud != is.na(Udgift_til_dagtilbud)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Udgift_til_dagtilbud)) |>
+  fabletools::forecast(h = 1) |>
+  mutate(Date = rep(c("1992-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Udgift_til_dagtilbud, by = c("Kommune", "Date")) |> 
+  mutate(Udgift_til_dagtilbud = if_else(is.na(Udgift_til_dagtilbud) & Date == 1992,
+                                                .mean, Udgift_til_dagtilbud)) |> 
+  select(-.mean)
+
+Gross_Lending <- Ejendomspriser |>
+  as_tibble() |> 
+  select(Gross_Lending, Date, Kommune) |> 
+  filter(Gross_Lending != is.na(Gross_Lending)) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  mutate(reverse_time = rev(row_number())) |>
+  update_tsibble(index = reverse_time) |>
+  model(ARIMA = ARIMA(Gross_Lending)) |>
+  fabletools::forecast(h = 3) |>
+  mutate(Date = rep(c("1992-01-01","1993-01-01","1994-01-01"),93),
+         Date = year(Date)) |> 
+  as_tibble() |> 
+  select(Kommune, .mean, Date) |> 
+  as_tsibble(key = "Kommune", index = "Date")
+
+Ejendomspriser <- Ejendomspriser |> 
+  left_join(Gross_Lending, by = c("Kommune", "Date")) |> 
+  mutate(Gross_Lending = if_else(is.na(Gross_Lending) & Date == 1992,
+                                                .mean, Gross_Lending),
+         Gross_Lending = if_else(is.na(Gross_Lending) & Date == 1993,
+                                                .mean, Gross_Lending),
+         Gross_Lending = if_else(is.na(Gross_Lending) & Date == 1994,
+                                                .mean, Gross_Lending)) |> 
+  select(-.mean)
+
+```
+
+Then I create a diff version of all my explanatory variables and Growth_rate
+
+```{r}
+
+explanatory_vars <- c("Growth_rate", "Disp_Income", "Consumer_Confidence", "CCI", "Unemployment_rate",
+                      "GDP", "Gross_Lending", "Grundskyld", "Households", "Houses_sold", "Immigration",
+                      "Population", "PTIR", "PTRR", "Rent_Price", "Anmeldte_voldsforbrydelser", "Anmeldte_indbrud",
+                      "Density", "Udskrivningsprocent", "Udgift_til_dagtilbud", "Socioøkonomiske_indeks",
+                      "Interest_Rate", "Permits")
+
+Ejendomspriser <- Ejendomspriser |> 
+  mutate(across(all_of(explanatory_vars), ~c(NA, diff(.x)), .names = "diff_{.col}"))
+
+
+```
+
+
+Then I run a ADF test for every municipality and every explanatory variable to see if it is stationary or not!
+
+```{r}
+
+kommune_var <- "Kommune"
+dependent_var <- "Growth_rate"
+
+municipalities <- unique(Ejendomspriser$Kommune)
+p_value <- list()
+municipality_name <- list()
+variable_name <- list()
+results <- list()
+i = 1
+
+
+ADF_results <- for (municipality in municipalities) {
+  
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  for (j in 7:28) {
+    
+  municipality_data[[i]][,j] |> mutate()
+  
+  adf <- boot_adf(municipality_data[[i]][,j], B = 1999, deterministics = "trend", detrend = "OLS",
+         do_parallel = TRUE, show_progress = FALSE, criterion = "BIC", bootstrap = "AWB")
+  
+  p_value[j-6] <- adf$p.value < 0.05
+  municipality_name[j-6] <- municipality_data[[i]]$Kommune |> unique()
+  variable_name[j-6] <- adf$data.name
+  
+  results_municipality <- as.data.frame(cbind(municipality_name, variable_name, p_value))
+  
+  }
+  
+  i <- i + 1
+  
+  results <- bind_rows(results, results_municipality)
+  
+}
+
+test <- as.data.frame(results)
+
+test <- test |> rename(Kommune = municipality_name)
+
+```
+
+Then I run the ADF forecast
+
+```{r}
+
+dependent_var <- "de_trend_Growth_rate"
+explanatory_vars <- c("Disp_Income", "Consumer_Confidence", "CCI", "Unemployment_rate",
+                      "GDP", "Gross_Lending", "Grundskyld", "Households", "Houses_sold", "Immigration",
+                      "Population", "PTIR", "PTRR", "Rent_Price", "Anmeldte_voldsforbrydelser", "Anmeldte_indbrud",
+                      "Density", "Udskrivningsprocent", "Udgift_til_dagtilbud", "Socioøkonomiske_indeks",
+                      "Interest_Rate", "Permits")
+
+
+# Unique list of municipalities
+municipalities <- unique(Ejendomspriser$Kommune)
+
+# Placeholder for all combined forecasts across municipalities
+all_municipalities_combined_forecasts <- list()
+municipality_data <- list()
+i = 1
+
+# Loop through each municipality
+
+ARDL_results <- foreach (municipality = municipalities, .packages = c("dplyr", "ARDL", "tidyverse", "tibble", "stats")) %dopar% {
+  # Filter data for the current municipality and store it in the list
+  municipality_data[[i]] <- Ejendomspriser |> filter(Kommune == municipality)
+  
+  # Placeholder for combined forecasts for the current municipality
+  combined_forecasts <- list()
+  
+  # Expanding window parameters
+  start_window <- 20
+  end_window <- nrow(municipality_data[[i]])
+  forecast_horizon <- 1
+  Dato <- list()
+  j <- 1
+  forecasted_value_mean <- list()
+  forecasted_value_rank <- list()
+  
+  
+  for (time in seq(start_window, end_window, by = 1)) {
+  
+  window_data <- municipality_data[[i]][1:(time), ] # Expanding window data for the municipality
+  
+  date <- municipality_data[[i]][1:time, ] |> dplyr::select(Date) |> tail(1) + 1
+  
+  # Store individual forecasts from each model for this window
+  window_forecasts <- numeric(length(explanatory_vars))
+  forecast <- list()
+  l <- 1
+  
+  for (var in explanatory_vars) {
+    
+    # Define the ARDL model formula
+    Growth_rate_diff <- Growth_rate_adf |> filter(municipality_name == municipality)
+    var_diff <- test |> filter(municipality_name == municipality & variable_name == var)
+    
+    model_formula_0_0 <- reformulate(c(paste0((var))), response = dependent_var)
+    model_formula_1_0 <- reformulate(c(paste0((var))), response = diff_dependent_var)
+    model_formula_0_1 <- reformulate(c(paste0("diff_", (var))), response = dependent_var)
+    model_formula_1_1 <- reformulate(c(paste0("diff_", (var))), response = diff_dependent_var)
+    
+    if(Growth_rate_diff$p_value == TRUE) {
+      
+      if(var_diff$p_value == TRUE) {
+        
+        model <- auto_ardl(model_formula_0_0, data = window_data, 
+                           max_order = c(4,4),
+                           starting_order = c(1,1), selection = "BIC")
+        
+      } else {
+        
+        model <- auto_ardl(model_formula_0_1, data = window_data, 
+                           max_order = c(4,4),
+                           starting_order = c(1,1), selection = "BIC")
+        
+      }
+      
+    } else {
+      
+      if(var_diff$p_value == TRUE) {
+        
+        model <- auto_ardl(model_formula_1_0, data = window_data, 
+                           max_order = c(4,4),
+                           starting_order = c(1,1), selection = "BIC")
+        
+      } else {
+        
+        model <- auto_ardl(model_formula_1_1, data = window_data, 
+                           max_order = c(4,4),
+                           starting_order = c(1,1), selection = "BIC")
+        
+      }
+      
+      
+    }
+    
+    forecast_data <- municipality_data[[i]][1:(time), ]
+    model_spec <- rownames_to_column(as.data.frame(model$best_order), var = "Variable")
+    var_lag_list <- list(model_spec$Variable[1], model_spec$Variable[2])
+    data <- add_dynamic_lags(forecast_data, var_lag_list)
+    lm_model <- to_lm(model$best_model)
+    forecast[l] <- predict(lm_model, data) |> tail(1)
+    window_data_1 <- municipality_data[[i]][(time+1):(time+1), ] |> 
+      as_tibble() |> 
+      select(Growth_rate)
+    rank_data <- as.tibble(unlist(forecast)) |> 
+      mutate(model = row_number(),
+             truth = window_data_1$Growth_rate) |> 
+      group_by(model) |> 
+      mutate(MSE = mean(value - truth)^2) |> 
+      ungroup() |> 
+      arrange(MSE) |> 
+      mutate(rank = row_number(),
+             weight = rank^(-1) / sum(rank)^(-1))
+    
+    l <- l + 1
+    
+  }
+  
+  forecasted_value_rank[j] <- sum(rank_data$weight*rank_data$value)/sum(rank_data$weight)
+  forecasted_value_mean[j] <- mean(unlist(forecast))
+  Dato[j] <- date
+  
+  j <- j + 1
+  
+}
+  
+  forecasted_values_mean <- as_tibble(cbind(unlist(Dato), unlist(forecasted_value_mean)))
+  forecasted_values_rank <- as_tibble(cbind(unlist(forecasted_value_rank)))
+  table <- cbind(municipality, forecasted_values_mean, forecasted_values_rank)
+  
+} 
+
+```
+
+```{r}
+
+ARDL_df <- as.tibble(bind_rows(ARDL_results)) |> 
+  rename(Kommune = municipality,
+         Date = V1...2,
+         mean_fc = V2...3,
+         rank_fc = V2...5) |> 
+  as_tsibble(key = "Kommune", index = "Date") |> 
+  pivot_longer(cols = "mean_fc":"rank_fc",
+                        names_to = "model",
+                        values_to = "forecast")
+
+ARDL_df |> 
+  left_join(Ejendomspriser |>
+              select(Kommune, Date, Growth_rate, trend), by = c("Kommune", "Date"),
+            relationship = 'many-to-many') |> 
+  rename(Truth = Growth_rate,
+         Prediction = forecast) |> 
+  mutate(Prediction = Prediction + trend) |> 
+  select(Date, Prediction, Truth, model) |>
+  group_by(model) |> 
+  yardstick::rmse(Truth, Prediction)
+
+```
+```{r}
+
+library(glmnet)
+library(boot)
+
+Ejendomspriser_lagged <- Ejendomspriser |> 
+  mutate(across(7:28, \(x) lag(x), .names = "lag_{.col}")) |> 
+  na.omit()
+
+x <- as.matrix(Ejendomspriser_lagged |>
+                 select(starts_with("lag")))
+
+y <- Ejendomspriser_lagged$de_trend_Growth_rate  # Adjust this to your specific target variable
+
+# Fit Lasso model
+glmnet_statistic <- function(data) {
+  # Subset the data based on indices provided by bootstrapping
+  data_subset <- data |> 
+  mutate(across(7:28, \(x) lag(x), .names = "lag_{.col}")) |> 
+  na.omit()
+  
+  x_subset <- as.matrix(data_subset |>
+                 select(starts_with("lag")))  # Adjust these indices based on your setup
+  y_subset <- data_subset$de_trend_Growth_rate
+  
+  # Fit the glmnet model on the subset
+  fit <- glmnet(x_subset, y_subset, alpha = 1)
+  
+  return(fit)
+}
+
+Ejendomspriser_STL <- Ejendomspriser |>
+  filter(Kommune == "København") |> 
+  na.omit() |> 
+  model(stl = STL(de_trend_Growth_rate))
+
+
+Ejendomspriser_STL |> 
+  generate(new_data = Ejendomspriser |> 
+             filter(Kommune == "København"), times = 100,
+           bootstrap_block_size = 8) |> 
+  select(Date, de_trend_Growth_rate, .sim) |> 
+  autoplot(.sim) +
+  autolayer(Ejendomspriser |> 
+              filter(Kommune == "København"), de_trend_Growth_rate) +
+  guides(colour = "none")
+
+
+tsboot(
+  Ejendomspriser_lagged,
+  statistic = glmnet_statistic,
+  R = 5
+)
+
+```
+
+
 
 # Conclusion
 
-asdasd
+# Appendix
 
-```{r}
-#| echo: false
-2 * 2
+```{r echo=FALSE, warning=FALSE, eval=FALSE}
+
+#| label: ADF test on Real growth rate in house prices for Copenhagen
+
+ADF <- Ejendomspriser |> 
+  filter(Kommune == "København") |> 
+  as.tibble() |> 
+  select(Growth_rate) |> 
+  filter(Growth_rate != is.na(Growth_rate)) |> 
+  ts() |> 
+  adf.test(, nlag = 4)
+
+ADF_data <- bind_rows(
+  ADF$type1 %>% as_tibble() %>% mutate(test = 1),
+  ADF$type2 %>% as_tibble() %>% mutate(test = 2),
+  ADF$type3 %>% as_tibble() %>% mutate(test = 3)) |> 
+  mutate(p.value = round(p.value,2),
+         ADF = round(ADF,2))
+
+wide_adf_data <- ADF_data %>%
+  pivot_wider(
+    id_cols = lag,
+    names_from = test,
+    values_from = c(ADF, `p.value`)
+  )
+
+adf_table <- wide_adf_data %>%
+  gt() %>%
+  tab_header(
+    title = "ADF Test Results by Type"
+  ) |> 
+  tab_spanner(
+    label = "ADF no trend",
+    columns = c("ADF_1","p.value_1")
+  ) |> 
+  tab_spanner(
+    label = "ADF trend no season",
+    columns = c("ADF_2","p.value_2")
+  ) |> 
+  tab_spanner(
+    label = "ADF trend & season",
+    columns = c("ADF_3","p.value_3")
+  ) |> 
+  cols_label(
+    lag = "Lag",
+    `p.value_1` = "P-Value",
+    `p.value_2` = "P-Value",
+    `p.value_3` = "P-Value",
+    'ADF_1' = "ADF",
+    'ADF_2' = "ADF",
+    'ADF_3' = "ADF"
+  ) |> 
+  tab_options(
+    table.font.size = px(10),
+    data_row.padding = px(1),
+    column_labels.font.size = px(10),
+    column_labels.padding.horizontal = px(30),
+    heading.title.font.size = px(12),
+    table.align = "center") |> 
+  cols_align(
+    align = "center"
+  )
+
+adf_table
+```
+
+```{r .appendix}
+
+#| label: Appendix 1 ACF and PACF for Copenhagen
+
+ACF <- Ejendomspriser |> 
+  filter(Kommune == "København") |> 
+  select(Growth_rate) |> 
+  feasts::ACF(Growth_rate) |> 
+  autoplot() +
+  labs(
+    y = "",
+    x = "",
+    title = "ACF for Copenhagen"
+  )
+
+PACF <- Ejendomspriser |> 
+  filter(Kommune == "København") |> 
+  feasts::PACF(Growth_rate) |> 
+  autoplot() +
+  labs(
+    y = "",
+    x = "",
+    title = "PACF for Copenhagen"
+  )
+
+grid.arrange(ACF, PACF, ncol=2)
+
 ```
